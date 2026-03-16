@@ -1,0 +1,17 @@
+# This service runs once at boot
+# It pulls the latest hookscript + mounts.yaml from Gitea
+
+# place in /etc/systemd/system/hooksync.service
+# systemctl daemon-reload
+# systemctl enable hooksync.service
+
+[Unit]
+Description=Run hookscript sync daily and at boot
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1d
+Persistent=true
+
+[Install]
+WantedBy=timers.target
