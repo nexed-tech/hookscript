@@ -2,29 +2,26 @@
 
 use strict;
 use warnings;
-use IO::Handle;
 use Sys::Hostname;
+use IO::Handle;
+use YAML::XS 'LoadFile';
 
 my $vmid  = shift;
 my $phase = shift;
-
 my $conf_file = "/etc/pve/lxc/${vmid}.conf";
 my $hostname  = hostname();
 
-# Common mounts for all hosts
-my %mounts = (
-    'mp-s' => { mp => 'mp0', src => '/mnt/pve/nas01-shares',      dst => '/mnt/Shares' },
-    'mp-b' => { mp => 'mp1', src => '/mnt/pve/nas01-backups',     dst => '/mnt/Backups' },
-    'mp-p' => { mp => 'mp2', src => '/mnt/pve/nas01-backups-pbs', dst => '/mnt/Backups-PBS' },
-);
+# Load YAML config
+my $config = LoadFile('/etc/pve/mounts.yaml');
 
-# Host-specific differences
-if ($hostname eq 'pve1') {
-    $mounts{'mp-u'} = { mp => 'mp3', src => '/usbssd/download_tmp', dst => '/mnt/download_tmp' };
+# Start with common mounts
+my %mounts = %{ $config->{common} };
+
+# Merge host-specific overrides if present
+if (exists $config->{hosts}{$hostname}) {
+    my $overrides = $config->{hosts}{$hostname};
+    @mounts{ keys %$overrides } = values %$overrides;
 }
-#elsif ($hostname eq 'pve2') {
-#    $mounts{'mp-u'} = { mp => 'mp3', src => '/otherusb/download_tmp', dst => '/mnt/download_tmp' };
-#}
 
 sub logmsg {
     my ($msg) = @_;
