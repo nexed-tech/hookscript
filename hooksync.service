@@ -1,0 +1,20 @@
+# This service runs once at boot
+# It pulls the latest hookscript + mounts.yaml from Gitea
+
+# place in /etc/systemd/system/hooksync.service
+# systemctl daemon-reload
+# systemctl enable hooksync.service
+
+[Unit]
+Description=Update Proxmox hookscript from Gitea
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/var/lib/vz/snippets
+ExecStart=/usr/bin/git pull
+User=root
+
+[Install]
+WantedBy=multi-user.target
