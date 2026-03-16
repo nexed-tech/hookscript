@@ -1,0 +1,20 @@
+common:
+  mp-s:
+    mp: mp0
+    src: /mnt/pve/nas01-shares
+    dst: /mnt/Shares
+  mp-b:
+    mp: mp1
+    src: /mnt/pve/nas01-backups
+    dst: /mnt/Backups
+  mp-p:
+    mp: mp2
+    src: /mnt/pve/nas01-backups-pbs
+    dst: /mnt/Backups-PBS
+
+hosts:
+  pve1:
+    mp-u:
+      mp: mp3
+      src: /usbssd/download_tmp
+      dst: /mnt/download_tmp
