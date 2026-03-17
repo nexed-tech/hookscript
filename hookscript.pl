@@ -12,7 +12,7 @@ my $conf_file = "/etc/pve/lxc/${vmid}.conf";
 my $hostname  = hostname();
 
 # Load YAML config
-my $config = LoadFile('./mounts.yaml');
+my $config = LoadFile('/var/lib/vz/snippets/mounts.yaml');
 
 # Start with common mounts
 my %mounts = %{ $config->{common} };
