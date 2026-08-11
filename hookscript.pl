@@ -78,7 +78,7 @@ sub add_mounts {
         next if $exists;
 
         logmsg("Adding $mpid ($src → $dst)");
-        push @lines, "$mpid: $src,mp=$dst\n";
+        push @lines, "$mpid: $src,mp=$dst,replicate=0,backup=0,shared=1\n";
     }
 
     write_config(@lines);
