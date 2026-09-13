@@ -61,6 +61,64 @@ sub get_tags {
     return ();
 }
 
+sub load_network_config {
+    my $path = '/var/lib/vz/snippets/network.yaml';
+    return undef unless -e $path;
+    my $netcfg = eval { LoadFile($path) };
+    if ($@) {
+        logmsg("Failed to load $path: $@");
+        return undef;
+    }
+    return $netcfg;
+}
+
+sub set_static_network {
+    my $netcfg = load_network_config();
+    return unless $netcfg;
+
+    my ($vlan, $host) = $vmid =~ /^(\d{2})(\d{3})$/;
+    unless (defined $vlan) {
+        logmsg("VMID $vmid does not match VVOOO network scheme, skipping static IP");
+        return;
+    }
+    $vlan = int($vlan);
+    $host = int($host);
+
+    my @allowed_vlans = @{ $netcfg->{vlans} || [] };
+    unless (grep { $_ == $vlan } @allowed_vlans) {
+        logmsg("VLAN $vlan (from VMID $vmid) not in allowed vlans list, skipping static IP");
+        return;
+    }
+
+    my $base        = $netcfg->{network}{base};
+    my $cidr        = $netcfg->{network}{cidr};
+    my $gw_octet    = $netcfg->{gateway_overrides}{$vlan} // $netcfg->{network}{gateway_octet};
+    my %untagged    = map { $_ => 1 } @{ $netcfg->{untagged} || [] };
+
+    my $ip = "$base.$vlan.$host";
+    my $gw = "$base.$vlan.$gw_octet";
+    my $tag_part = $untagged{$vlan} ? '' : ",tag=$vlan";
+
+    my @lines = read_config();
+    my $changed = 0;
+
+    foreach my $line (@lines) {
+        if ($line =~ /^(net\d+):\s*(.*)$/) {
+            my ($netid, $rest) = ($1, $2);
+            next unless $rest =~ /(?:^|,)ip=dhcp(?:,|$)/;
+
+            $rest =~ s/(?:^|,)\Kip=dhcp/ip=$ip\/$cidr,gw=$gw/;
+            $rest .= $tag_part if $tag_part && $rest !~ /(?:^|,)tag=/;
+
+            logmsg("Setting $netid for $vmid to $ip/$cidr, gw $gw" . ($tag_part ? " (vlan $vlan)" : " (untagged, vlan $vlan)"));
+            $line = "$netid: $rest\n";
+            $changed = 1;
+        }
+    }
+
+    write_config(@lines) if $changed;
+}
+
 sub add_mounts {
     my @lines = read_config();
     my @tags  = get_tags(@lines);
@@ -166,6 +224,7 @@ if ($phase eq 'pre-start') {
     logmsg("$vmid is starting");
     check_and_mount_nfs();
     add_mounts();
+    set_static_network();
 }
 elsif ($phase eq 'pre-stop') {
     pre_stop_report();

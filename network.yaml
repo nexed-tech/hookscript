@@ -1,0 +1,28 @@
+# Network addressing derived from VMID.
+#
+# VMID format is VVOOO (5 digits):
+#   VV  = VLAN ID, also used as the 3rd IP octet
+#   OOO = 4th IP octet
+#
+# Example: VMID 10075 -> VLAN 10, IP 192.168.10.75
+#          VMID 16241 -> VLAN 16, IP 192.168.16.241
+#
+# To adapt this to a different network (e.g. 10.0.x.x instead of 192.168.x.x),
+# just change `base` below.
+network:
+  base: 192.168       # first two octets of the network
+  cidr: 24
+  gateway_octet: 254  # default gateway octet: base.<vlan>.<gateway_octet>
+
+# Optional per-VLAN gateway overrides, for networks where the gateway isn't
+# on the same octet everywhere. Any VLAN not listed here uses gateway_octet
+# above. Example: `17: 1` would make the vlan 17 gateway 192.168.17.1
+gateway_overrides: {}
+
+# VLANs that are valid targets for this scheme. Any VMID whose derived VLAN
+# isn't listed here is left alone (so normal/non-network-encoded VMIDs are safe).
+vlans: [10, 16, 17]
+
+# VLANs that are untagged (native) on the LXC bridge - no `tag=` is added to
+# net0 for these. Everything else in `vlans` gets `tag=<vlan>`.
+untagged: [10]
