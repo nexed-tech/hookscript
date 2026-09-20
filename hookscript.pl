@@ -590,57 +590,12 @@ sub cloudflare_post_stop {
 my $LUD_BEGIN = '# BEGIN lud-managed-key (hookscript, do not edit)';
 my $LUD_END   = '# END lud-managed-key';
 
-# `pct mount`/`pct unmount` take the same per-vmid lock that `pct start`
-# holds for the whole start sequence, so calling them from a hook for the
-# container being started deadlocks. By post-start the container is already
-# running, so its rootfs is already bind-mounted at the usual host path -
-# just use that directly, no pct locking involved.
-sub container_rootfs_path {
-    my ($vmid) = @_;
-    my $path = "/var/lib/lxc/$vmid/rootfs";
-    unless (-d $path) {
-        logmsg("$path does not exist, skipping LUD SSH key sync for $vmid");
-        return undef;
-    }
-    if (system("mountpoint -q $path") != 0) {
-        logmsg("$path is not a mountpoint, skipping LUD SSH key sync for $vmid");
-        return undef;
-    }
-    return $path;
-}
-
-# Unprivileged containers shift every uid/gid by a fixed offset (100000 by
-# default on Proxmox) between host and guest. A custom lxc.idmap overrides
-# that offset in a way we can't safely guess, so bail rather than risk
-# writing a file the guest's sshd won't recognize as owned by it.
-sub lxc_uid_shift {
-    my (@lines) = @_;
-    my $unprivileged = 0;
-    foreach my $line (@lines) {
-        return (undef, 1) if $line =~ /^lxc\.idmap:/;
-        $unprivileged = 1 if $line =~ /^unprivileged:\s*1\s*$/;
-    }
-    return $unprivileged ? (100000, 0) : (0, 0);
-}
-
-sub lxc_guest_id {
-    my ($rootfs, $user) = @_;
-    my $passwd = "$rootfs/etc/passwd";
-    return undef unless -e $passwd;
-
-    open my $fh, '<', $passwd or return undef;
-    my ($uid, $gid);
-    while (my $line = <$fh>) {
-        my @fields = split /:/, $line;
-        if (@fields >= 4 && $fields[0] eq $user) {
-            ($uid, $gid) = ($fields[2], $fields[3]);
-            last;
-        }
-    }
-    close $fh;
-    return ($uid, $gid);
-}
-
+# Storage backends put a running container's rootfs in different places on
+# the host (bind mount, ZFS dataset mountpoint, LVM-thin device, ...), so
+# there's no single host-side path to guess. `pct exec` (lxc-attach) reaches
+# into the container's own namespace instead, sidestepping that entirely -
+# and since commands run as the container sees itself, "root" is just uid 0
+# to it, no host/guest uid-shift math needed for unprivileged containers.
 sub sync_lud_ssh_key {
     my $secrets = load_secrets();
     return unless $secrets;
@@ -652,65 +607,52 @@ sub sync_lud_ssh_key {
     my $pubkey = $secrets->{LUD_SSH_PUBKEY};
     my $user   = $secrets->{LUD_SSH_USER} // 'root';
     my $home   = $user eq 'root' ? '/root' : "/home/$user";
+    my $ssh_dir = "$home/.ssh";
+    my $ak_file = "$ssh_dir/authorized_keys";
 
-    my @conf_lines = read_config();
-    my ($shift, $unsupported) = lxc_uid_shift(@conf_lines);
-    if ($unsupported) {
-        logmsg("Container $vmid has a custom lxc.idmap, skipping LUD SSH key sync (can't safely determine file ownership)");
+    my $id_out = `pct exec $vmid -- id -u $user 2>/dev/null`;
+    if ($? != 0 || $id_out !~ /^\d+/) {
+        logmsg("User '$user' not found in container $vmid, skipping LUD SSH key sync");
         return;
     }
 
-    my $rootfs = container_rootfs_path($vmid);
-    return unless $rootfs;
+    my @existing = `pct exec $vmid -- cat $ak_file 2>/dev/null`;
 
+    # Strip any previously-synced managed block, keep everything else.
+    my @kept;
+    my $in_block = 0;
+    foreach my $line (@existing) {
+        my $chomped = $line;
+        chomp $chomped;
+        if ($chomped eq $LUD_BEGIN) { $in_block = 1; next; }
+        if ($chomped eq $LUD_END)   { $in_block = 0; next; }
+        push @kept, $line unless $in_block;
+    }
+    pop @kept while @kept && $kept[-1] =~ /^\s*$/;
+    push @kept, "\n" if @kept;
+    push @kept, "$LUD_BEGIN\n", "$pubkey\n", "$LUD_END\n";
+
+    my $tmp = "/tmp/.lud-ak-$vmid.$$";
     eval {
-        my ($guest_uid, $guest_gid) = lxc_guest_id($rootfs, $user);
-        unless (defined $guest_uid) {
-            die "user '$user' not found in $vmid:/etc/passwd\n";
-        }
-        my $uid = $shift + $guest_uid;
-        my $gid = $shift + $guest_gid;
+        open my $fh, '>', $tmp or die "write $tmp: $!";
+        print $fh @kept;
+        close $fh;
 
-        my $ssh_dir = "$rootfs$home/.ssh";
-        my $ak_file = "$ssh_dir/authorized_keys";
+        system("pct exec $vmid -- mkdir -p $ssh_dir") == 0
+            or die "mkdir $ssh_dir in container $vmid failed\n";
+        system("pct exec $vmid -- sh -c 'cat > $ak_file' < $tmp") == 0
+            or die "writing $ak_file in container $vmid failed\n";
+        system("pct exec $vmid -- chmod 700 $ssh_dir") == 0
+            or die "chmod $ssh_dir in container $vmid failed\n";
+        system("pct exec $vmid -- chmod 600 $ak_file") == 0
+            or die "chmod $ak_file in container $vmid failed\n";
+        system("pct exec $vmid -- chown -R $user:$user $ssh_dir") == 0
+            or die "chown $ssh_dir in container $vmid failed\n";
 
-        unless (-d $ssh_dir) {
-            mkdir $ssh_dir, 0700 or die "mkdir $ssh_dir: $!";
-        }
-        chown $uid, $gid, $ssh_dir;
-
-        my @lines;
-        if (-e $ak_file) {
-            open my $fh, '<', $ak_file or die "open $ak_file: $!";
-            @lines = <$fh>;
-            close $fh;
-        }
-
-        # Strip any previously-synced managed block, keep everything else.
-        my @kept;
-        my $in_block = 0;
-        foreach my $line (@lines) {
-            my $chomped = $line;
-            chomp $chomped;
-            if ($chomped eq $LUD_BEGIN) { $in_block = 1; next; }
-            if ($chomped eq $LUD_END)   { $in_block = 0; next; }
-            push @kept, $line unless $in_block;
-        }
-        pop @kept while @kept && $kept[-1] =~ /^\s*$/;
-        push @kept, "\n" if @kept;
-        push @kept, "$LUD_BEGIN\n", "$pubkey\n", "$LUD_END\n";
-
-        my $tmp = "$ak_file.tmp";
-        open my $out, '>', $tmp or die "write $tmp: $!";
-        print $out @kept;
-        close $out;
-        chmod 0600, $tmp;
-        chown $uid, $gid, $tmp;
-        rename $tmp, $ak_file or die "rename $tmp to $ak_file: $!";
-
-        logmsg("Synced Linux Update Dashboard SSH key into $vmid:$home/.ssh/authorized_keys");
+        logmsg("Synced Linux Update Dashboard SSH key into $vmid:$ak_file");
     };
     logmsg("Failed to sync LUD SSH key for $vmid: $@") if $@;
+    unlink $tmp;
 }
 
 # -------------------------
