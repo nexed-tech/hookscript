@@ -272,7 +272,7 @@ sub get_container_ip {
 
 sub load_secrets {
     unless (-e $CF_SECRETS_FILE) {
-        logmsg("Cloudflare secrets file $CF_SECRETS_FILE not found, skipping cloudflare tunnel step");
+        logmsg("Secrets file $CF_SECRETS_FILE not found, skipping features that need it");
         return undef;
     }
 
@@ -291,14 +291,15 @@ sub load_secrets {
     }
     close $fh;
 
-    foreach my $key (qw(CF_API_TOKEN CF_ACCOUNT_ID CF_TUNNEL_ID)) {
-        unless (defined $secrets{$key} && length $secrets{$key}) {
-            logmsg("Cloudflare secrets file $CF_SECRETS_FILE missing $key, skipping cloudflare tunnel step");
-            return undef;
-        }
-    }
-
     return \%secrets;
+}
+
+sub require_secrets {
+    my ($secrets, @keys) = @_;
+    foreach my $key (@keys) {
+        return 0 unless defined $secrets->{$key} && length $secrets->{$key};
+    }
+    return 1;
 }
 
 sub acquire_cf_lock {
@@ -532,6 +533,10 @@ sub cloudflare_pre_start {
 
     my $secrets = load_secrets();
     return unless $secrets;
+    unless (require_secrets($secrets, qw(CF_API_TOKEN CF_ACCOUNT_ID CF_TUNNEL_ID))) {
+        logmsg("Secrets file missing CF_API_TOKEN/CF_ACCOUNT_ID/CF_TUNNEL_ID, skipping cloudflare tunnel step");
+        return;
+    }
 
     logmsg("Configuring cloudflare tunnel for $fqdn -> http://$ip:$port");
     ensure_dns_record($fqdn, $secrets);
@@ -562,10 +567,154 @@ sub cloudflare_post_stop {
 
     my $secrets = load_secrets();
     return unless $secrets;
+    unless (require_secrets($secrets, qw(CF_API_TOKEN CF_ACCOUNT_ID CF_TUNNEL_ID))) {
+        logmsg("Secrets file missing CF_API_TOKEN/CF_ACCOUNT_ID/CF_TUNNEL_ID, skipping cloudflare tunnel step");
+        return;
+    }
 
     logmsg("Removing cloudflare tunnel config for $fqdn");
     remove_cloudflare_ingress($fqdn, $secrets);
     delete_dns_record($fqdn, $secrets);
+}
+
+# -------------------------
+# Linux Update Dashboard SSH key sync
+# -------------------------
+#
+# Every container gets the Linux Update Dashboard's SSH public key merged
+# into its authorized_keys on every start/reboot - no tag needed. Rotate the
+# key by editing LUD_SSH_PUBKEY in the secrets file; the next start/reboot of
+# any container picks it up. The managed key lives inside a marked block so
+# any other keys already present are left untouched.
+
+my $LUD_BEGIN = '# BEGIN lud-managed-key (hookscript, do not edit)';
+my $LUD_END   = '# END lud-managed-key';
+
+sub pct_mount {
+    my ($vmid) = @_;
+    my $out = `pct mount $vmid 2>&1`;
+    if ($? != 0) {
+        logmsg("pct mount $vmid failed: $out");
+        return undef;
+    }
+    if ($out =~ /'([^']+)'/) {
+        return $1;
+    }
+    my $fallback = "/var/lib/lxc/$vmid/rootfs";
+    logmsg("Could not parse 'pct mount' output for $vmid, falling back to $fallback");
+    return $fallback;
+}
+
+sub pct_unmount {
+    my ($vmid) = @_;
+    system('pct', 'unmount', $vmid);
+    logmsg("pct unmount $vmid exited nonzero") if $? != 0;
+}
+
+# Unprivileged containers shift every uid/gid by a fixed offset (100000 by
+# default on Proxmox) between host and guest. A custom lxc.idmap overrides
+# that offset in a way we can't safely guess, so bail rather than risk
+# writing a file the guest's sshd won't recognize as owned by it.
+sub lxc_uid_shift {
+    my (@lines) = @_;
+    my $unprivileged = 0;
+    foreach my $line (@lines) {
+        return (undef, 1) if $line =~ /^lxc\.idmap:/;
+        $unprivileged = 1 if $line =~ /^unprivileged:\s*1\s*$/;
+    }
+    return $unprivileged ? (100000, 0) : (0, 0);
+}
+
+sub lxc_guest_id {
+    my ($rootfs, $user) = @_;
+    my $passwd = "$rootfs/etc/passwd";
+    return undef unless -e $passwd;
+
+    open my $fh, '<', $passwd or return undef;
+    my ($uid, $gid);
+    while (my $line = <$fh>) {
+        my @fields = split /:/, $line;
+        if (@fields >= 4 && $fields[0] eq $user) {
+            ($uid, $gid) = ($fields[2], $fields[3]);
+            last;
+        }
+    }
+    close $fh;
+    return ($uid, $gid);
+}
+
+sub sync_lud_ssh_key {
+    my $secrets = load_secrets();
+    return unless $secrets;
+    unless (require_secrets($secrets, qw(LUD_SSH_PUBKEY))) {
+        logmsg("Secrets file missing LUD_SSH_PUBKEY, skipping Linux Update Dashboard SSH key sync");
+        return;
+    }
+
+    my $pubkey = $secrets->{LUD_SSH_PUBKEY};
+    my $user   = $secrets->{LUD_SSH_USER} // 'root';
+    my $home   = $user eq 'root' ? '/root' : "/home/$user";
+
+    my @conf_lines = read_config();
+    my ($shift, $unsupported) = lxc_uid_shift(@conf_lines);
+    if ($unsupported) {
+        logmsg("Container $vmid has a custom lxc.idmap, skipping LUD SSH key sync (can't safely determine file ownership)");
+        return;
+    }
+
+    my $rootfs = pct_mount($vmid);
+    return unless $rootfs;
+
+    eval {
+        my ($guest_uid, $guest_gid) = lxc_guest_id($rootfs, $user);
+        unless (defined $guest_uid) {
+            die "user '$user' not found in $vmid:/etc/passwd\n";
+        }
+        my $uid = $shift + $guest_uid;
+        my $gid = $shift + $guest_gid;
+
+        my $ssh_dir = "$rootfs$home/.ssh";
+        my $ak_file = "$ssh_dir/authorized_keys";
+
+        unless (-d $ssh_dir) {
+            mkdir $ssh_dir, 0700 or die "mkdir $ssh_dir: $!";
+        }
+        chown $uid, $gid, $ssh_dir;
+
+        my @lines;
+        if (-e $ak_file) {
+            open my $fh, '<', $ak_file or die "open $ak_file: $!";
+            @lines = <$fh>;
+            close $fh;
+        }
+
+        # Strip any previously-synced managed block, keep everything else.
+        my @kept;
+        my $in_block = 0;
+        foreach my $line (@lines) {
+            my $chomped = $line;
+            chomp $chomped;
+            if ($chomped eq $LUD_BEGIN) { $in_block = 1; next; }
+            if ($chomped eq $LUD_END)   { $in_block = 0; next; }
+            push @kept, $line unless $in_block;
+        }
+        pop @kept while @kept && $kept[-1] =~ /^\s*$/;
+        push @kept, "\n" if @kept;
+        push @kept, "$LUD_BEGIN\n", "$pubkey\n", "$LUD_END\n";
+
+        my $tmp = "$ak_file.tmp";
+        open my $out, '>', $tmp or die "write $tmp: $!";
+        print $out @kept;
+        close $out;
+        chmod 0600, $tmp;
+        chown $uid, $gid, $tmp;
+        rename $tmp, $ak_file or die "rename $tmp to $ak_file: $!";
+
+        logmsg("Synced Linux Update Dashboard SSH key into $vmid:$home/.ssh/authorized_keys");
+    };
+    logmsg("Failed to sync LUD SSH key for $vmid: $@") if $@;
+
+    pct_unmount($vmid);
 }
 
 # -------------------------
@@ -578,6 +727,7 @@ if ($phase eq 'pre-start') {
     add_mounts();
     set_static_network();
     cloudflare_pre_start();
+    sync_lud_ssh_key();
 }
 elsif ($phase eq 'pre-stop') {
     pre_stop_report();
