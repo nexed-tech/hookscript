@@ -590,25 +590,23 @@ sub cloudflare_post_stop {
 my $LUD_BEGIN = '# BEGIN lud-managed-key (hookscript, do not edit)';
 my $LUD_END   = '# END lud-managed-key';
 
-sub pct_mount {
+# `pct mount`/`pct unmount` take the same per-vmid lock that `pct start`
+# holds for the whole start sequence, so calling them from a hook for the
+# container being started deadlocks. By post-start the container is already
+# running, so its rootfs is already bind-mounted at the usual host path -
+# just use that directly, no pct locking involved.
+sub container_rootfs_path {
     my ($vmid) = @_;
-    my $out = `pct mount $vmid 2>&1`;
-    if ($? != 0) {
-        logmsg("pct mount $vmid failed: $out");
+    my $path = "/var/lib/lxc/$vmid/rootfs";
+    unless (-d $path) {
+        logmsg("$path does not exist, skipping LUD SSH key sync for $vmid");
         return undef;
     }
-    if ($out =~ /'([^']+)'/) {
-        return $1;
+    if (system("mountpoint -q $path") != 0) {
+        logmsg("$path is not a mountpoint, skipping LUD SSH key sync for $vmid");
+        return undef;
     }
-    my $fallback = "/var/lib/lxc/$vmid/rootfs";
-    logmsg("Could not parse 'pct mount' output for $vmid, falling back to $fallback");
-    return $fallback;
-}
-
-sub pct_unmount {
-    my ($vmid) = @_;
-    system('pct', 'unmount', $vmid);
-    logmsg("pct unmount $vmid exited nonzero") if $? != 0;
+    return $path;
 }
 
 # Unprivileged containers shift every uid/gid by a fixed offset (100000 by
@@ -662,7 +660,7 @@ sub sync_lud_ssh_key {
         return;
     }
 
-    my $rootfs = pct_mount($vmid);
+    my $rootfs = container_rootfs_path($vmid);
     return unless $rootfs;
 
     eval {
@@ -713,8 +711,6 @@ sub sync_lud_ssh_key {
         logmsg("Synced Linux Update Dashboard SSH key into $vmid:$home/.ssh/authorized_keys");
     };
     logmsg("Failed to sync LUD SSH key for $vmid: $@") if $@;
-
-    pct_unmount($vmid);
 }
 
 # -------------------------
@@ -727,6 +723,8 @@ if ($phase eq 'pre-start') {
     add_mounts();
     set_static_network();
     cloudflare_pre_start();
+}
+elsif ($phase eq 'post-start') {
     sync_lud_ssh_key();
 }
 elsif ($phase eq 'pre-stop') {
