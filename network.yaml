@@ -21,7 +21,7 @@ gateway_overrides: {}
 
 # VLANs that are valid targets for this scheme. Any VMID whose derived VLAN
 # isn't listed here is left alone (so normal/non-network-encoded VMIDs are safe).
-vlans: [10, 16, 17]
+vlans: [10, 11, 16, 17]
 
 # VLANs that are untagged (native) on the LXC bridge - no `tag=` is added to
 # net0 for these. Everything else in `vlans` gets `tag=<vlan>`.
