@@ -16,5 +16,5 @@ hosts:
   pve1:
     mp-u:
       mp: mp3
-      src: /mnt/pve/nas01-backups/usbssd/
+      src: /mnt/pve/nas01-backups
       dst: /mnt/download_tmp
