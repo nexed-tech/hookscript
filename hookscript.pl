@@ -703,10 +703,13 @@ sub pct_run {
     return system('pct', 'exec', $vmid, '--', @cmd) == 0;
 }
 
+# Not `pct push`: that takes the container's config lock, which Proxmox still
+# holds while the post-start hook runs, so it times out. `pct exec` doesn't.
+# Written to a temp file + mv so apt never sees a half-written file.
 sub pct_push_file {
     my ($src, $dst) = @_;
     pct_run('mkdir', '-p', dirname($dst)) or die "mkdir " . dirname($dst) . " in container $vmid failed\n";
-    system('pct', 'push', $vmid, $src, $dst, '--perms', '0644') == 0
+    system("pct exec $vmid -- sh -c 'cat > $dst.tmp && chmod 0644 $dst.tmp && mv -f $dst.tmp $dst' < $src") == 0
         or die "pushing $dst into container $vmid failed\n";
 }
 
