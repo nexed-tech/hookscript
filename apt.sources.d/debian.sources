@@ -1,13 +1,11 @@
 Types: deb
 URIs: http://deb.debian.org/debian/
-#URIs: http://debmirror.home.nexed.tech/debian
 Suites: @CODENAME@ @CODENAME@-updates
 Components: main contrib
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
 Types: deb
 URIs: http://security.debian.org/
-#URIs: http://debmirror.home.nexed.tech/debian-security
 Suites: @CODENAME@-security
 Components: main contrib
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
