@@ -11,10 +11,7 @@ common:
     mp: mp2
     src: /mnt/pve/nas01-backups-pbs
     dst: /mnt/Backups-PBS
-
-hosts:
-  pve1:
-    mp-u:
-      mp: mp3
-      src: /mnt/pve/nas01-backups
-      dst: /mnt/download_tmp
+  mp-a:
+    mp: mp4
+    src: /mnt/pve/nas01-appdata
+    dst: /mnt/AppData
