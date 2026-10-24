@@ -3,7 +3,7 @@
 # over https and caches it. Needs the 00aptproxy entry - without the proxy
 # this URI doesn't resolve.
 Types: deb
-URIs: http://HTTPS///download.docker.com/linux/debian
+URIs: http://download.docker.com/linux/debian
 Suites: @CODENAME@
 Components: stable
 Signed-By: /etc/apt/keyrings/docker.asc
