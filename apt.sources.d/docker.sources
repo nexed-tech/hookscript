@@ -1,0 +1,9 @@
+# Docker only serves https (http redirects), so this uses apt-cacher-ng's
+# HTTPS/// form: apt talks plain http to the cache, the cache fetches upstream
+# over https and caches it. Needs the 00aptproxy entry - without the proxy
+# this URI doesn't resolve.
+Types: deb
+URIs: http://HTTPS///download.docker.com/linux/debian
+Suites: @CODENAME@
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc

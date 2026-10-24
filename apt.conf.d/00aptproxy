@@ -1,0 +1,2 @@
+Acquire::http { Proxy "http://aptcache.nexed.tech"; };
+Acquire::https { Proxy "http://aptcache.nexed.tech"; };

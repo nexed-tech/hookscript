@@ -7,6 +7,7 @@ use IO::Handle;
 use YAML::XS 'LoadFile';
 use JSON::PP qw(encode_json decode_json);
 use Fcntl qw(:flock);
+use File::Basename qw(dirname basename);
 
 my $vmid  = shift;
 my $phase = shift;
@@ -656,10 +657,240 @@ sub sync_lud_ssh_key {
 }
 
 # -------------------------
+# APT sources + config
+# -------------------------
+#
+# apt.yaml picks the entries a Debian container gets: `default` for all of
+# them, plus `tags` (Proxmox tag -> entries) and `hostnames` (glob on the
+# conf's hostname: line -> entries). An entry is apt.sources.d/<name>.sources
+# and/or apt.conf.d/<name>; see apt.yaml for the details. Pushed via
+# `pct push`/`pct exec` for the same reason as the LUD key sync above.
+
+my $SNIPPETS        = '/var/lib/vz/snippets';
+my $APT_SOURCES_DIR = "$SNIPPETS/apt.sources.d";
+my $APT_CONF_DIR    = "$SNIPPETS/apt.conf.d";
+my $APT_KEY_CACHE   = "$SNIPPETS/.apt-keys";
+my $APT_KEY_MAX_AGE = 1;    # days before a cached key is re-downloaded
+my $APT_MARKER      = 'managed by hookscript (apt.yaml)';
+
+sub slurp {
+    my ($path) = @_;
+    open my $fh, '<', $path or die "Cannot open $path: $!\n";
+    local $/;
+    my $content = <$fh>;
+    close $fh;
+    return $content;
+}
+
+sub glob_match {
+    my ($glob, $str) = @_;
+    my $re = join '', map { $_ eq '*' ? '.*' : $_ eq '?' ? '.' : quotemeta } split //, $glob;
+    return $str =~ /^$re$/i;
+}
+
+# Runs a command inside the container, returns its stdout (exit code ignored).
+sub pct_capture {
+    my (@cmd) = @_;
+    open(my $fh, '-|', 'pct', 'exec', $vmid, '--', @cmd) or return '';
+    local $/;
+    my $out = <$fh> // '';
+    close $fh;
+    return $out;
+}
+
+sub pct_run {
+    my (@cmd) = @_;
+    return system('pct', 'exec', $vmid, '--', @cmd) == 0;
+}
+
+sub pct_push_file {
+    my ($src, $dst) = @_;
+    pct_run('mkdir', '-p', dirname($dst)) or die "mkdir " . dirname($dst) . " in container $vmid failed\n";
+    system('pct', 'push', $vmid, $src, $dst, '--perms', '0644') == 0
+        or die "pushing $dst into container $vmid failed\n";
+}
+
+sub pct_push_content {
+    my ($content, $dst) = @_;
+    my $tmp = "/tmp/.apt-$vmid.$$";
+    open my $fh, '>', $tmp or die "write $tmp: $!\n";
+    print $fh $content;
+    close $fh;
+    eval { pct_push_file($tmp, $dst) };
+    my $err = $@;
+    unlink $tmp;
+    die $err if $err;
+}
+
+sub apt_wanted_entries {
+    my ($aptcfg, $tags, $fqdn) = @_;
+
+    my @names = @{ $aptcfg->{default} || [] };
+    push @names, @{ $aptcfg->{tags}{$_} || [] } foreach @$tags;
+
+    if (defined $fqdn && length $fqdn) {
+        my ($short) = split /\./, $fqdn;
+        foreach my $glob (keys %{ $aptcfg->{hostnames} || {} }) {
+            next unless glob_match($glob, $fqdn) || glob_match($glob, $short);
+            push @names, @{ $aptcfg->{hostnames}{$glob} || [] };
+        }
+    }
+
+    my %seen;
+    return grep { !$seen{$_}++ } @names;
+}
+
+# Returns the host-side path of a usable key for <name>, refreshing the cache
+# when it's older than $APT_KEY_MAX_AGE. Falls back to a stale cached copy if
+# the download fails, undef if there's nothing at all.
+sub apt_fetch_key {
+    my ($name, $keyfile) = @_;
+
+    my ($url) = grep { /\S/ } split /\n/, slurp("$APT_SOURCES_DIR/$name.gpg.link");
+    $url =~ s/^\s+|\s+$//g;
+
+    mkdir $APT_KEY_CACHE unless -d $APT_KEY_CACHE;
+    my $cached = "$APT_KEY_CACHE/$keyfile";
+    return $cached if -s $cached && -M $cached < $APT_KEY_MAX_AGE;
+
+    my $tmp = "$cached.tmp.$$";
+    if (system('curl', '-fsSL', '--max-time', '20', '-o', $tmp, $url) == 0 && -s $tmp) {
+        rename $tmp, $cached or die "rename $tmp: $!\n";
+        logmsg("Fetched APT key for $name from $url");
+    } else {
+        unlink $tmp;
+        logmsg("Failed to fetch APT key for $name from $url" . (-s $cached ? ", using cached copy" : ''));
+    }
+    return -s $cached ? $cached : undef;
+}
+
+sub apt_install_source {
+    my ($name, $dst, $codename) = @_;
+
+    my $body = slurp("$APT_SOURCES_DIR/$name.sources");
+    $body =~ s/\@CODENAME\@/$codename/g;
+
+    foreach my $keypath (do { my %s; grep { !$s{$_}++ } $body =~ /^Signed-By:\s*(\/\S+)\s*$/mgi }) {
+        if (-e "$APT_SOURCES_DIR/$name.gpg.link") {
+            my $cached = apt_fetch_key($name, basename($keypath))
+                or die "no key available for $name, leaving its source as-is\n";
+            pct_push_file($cached, $keypath);
+        } elsif (!pct_run('test', '-e', $keypath)) {
+            die "key $keypath missing in container and no $name.gpg.link to fetch it, leaving its source as-is\n";
+        }
+    }
+
+    pct_push_content("# $APT_MARKER, do not edit\n$body", $dst);
+    logmsg("Installed APT source $name into $vmid:$dst");
+}
+
+sub apt_install_conf {
+    my ($name, $dst) = @_;
+    pct_push_content("// $APT_MARKER, do not edit\n" . slurp("$APT_CONF_DIR/$name"), $dst);
+    logmsg("Installed APT config $name into $vmid:$dst");
+}
+
+sub apt_remove_unwanted {
+    my ($keep) = @_;
+    my $out = pct_capture('sh', '-c',
+        "grep -lsF '$APT_MARKER' /etc/apt/sources.list.d/* /etc/apt/apt.conf.d/*");
+    foreach my $path (grep { length } split /\n/, $out) {
+        next if $keep->{$path};
+        if (pct_run('rm', '-f', $path)) {
+            logmsg("Removed APT file $vmid:$path (no longer in apt.yaml for this container)");
+        } else {
+            logmsg("Failed to remove APT file $vmid:$path");
+        }
+    }
+}
+
+sub apt_disable_legacy {
+    my $out = pct_capture('sh', '-c',
+        'for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do [ -e "$f" ] && echo "$f"; done');
+    foreach my $path (grep { length } split /\n/, $out) {
+        if (pct_run('mv', '-f', $path, "$path.bak")) {
+            logmsg("Disabled legacy APT source $vmid:$path (renamed to .bak)");
+        } else {
+            logmsg("Failed to disable legacy APT source $vmid:$path");
+        }
+    }
+}
+
+sub sync_apt {
+    my $path = "$SNIPPETS/apt.yaml";
+    return unless -e $path;
+    my $aptcfg = eval { LoadFile($path) };
+    if ($@) {
+        logmsg("Failed to load $path: $@");
+        return;
+    }
+
+    my $os = pct_capture('cat', '/etc/os-release');
+    unless ($os =~ /^ID="?debian"?$/m) {
+        logmsg("Container $vmid is not Debian, skipping APT sync");
+        return;
+    }
+    my ($codename) = $os =~ /^VERSION_CODENAME="?([a-z]+)"?$/m;
+    unless ($codename) {
+        logmsg("No VERSION_CODENAME in $vmid:/etc/os-release, skipping APT sync");
+        return;
+    }
+
+    my @lines = read_config();
+    my @tags  = grep { length } map { s/^\s+|\s+$//gr } get_tags(@lines);
+    my @names = apt_wanted_entries($aptcfg, \@tags, get_hostname_from_config(@lines));
+    logmsg("APT entries for $vmid ($codename): @names");
+
+    my %keep;
+    my $installed_sources = 0;
+    foreach my $name (@names) {
+        my $has_source = -e "$APT_SOURCES_DIR/$name.sources";
+        my $has_conf   = -e "$APT_CONF_DIR/$name";
+        unless ($has_source || $has_conf) {
+            logmsg("APT entry '$name' has no apt.sources.d/$name.sources or apt.conf.d/$name, skipping");
+            next;
+        }
+
+        if ($has_source) {
+            my $dst = "/etc/apt/sources.list.d/$name.sources";
+            $keep{$dst} = 1;    # kept even if this push fails, so a bad key fetch doesn't drop a working repo
+            eval { apt_install_source($name, $dst, $codename); $installed_sources++ };
+            logmsg("APT source $name for $vmid: $@") if $@;
+        }
+        if ($has_conf) {
+            my $dst = "/etc/apt/apt.conf.d/$name";
+            $keep{$dst} = 1;
+            eval { apt_install_conf($name, $dst) };
+            logmsg("APT config $name for $vmid: $@") if $@;
+        }
+    }
+
+    apt_remove_unwanted(\%keep);
+    apt_disable_legacy() if $installed_sources;
+}
+
+# -------------------------
 # Phase handling
 # -------------------------
 
-if ($phase eq 'pre-start') {
+# Not a Proxmox phase: `hookscript.pl apt-sync-all` (run daily by hooksync)
+# re-runs the APT sync on every running container, so key rotations and
+# apt.yaml changes reach containers that rarely restart. Each one runs as its
+# own `hookscript.pl <vmid> apt-sync` so the per-container globals stay simple.
+if ($vmid eq 'apt-sync-all') {
+    foreach my $line (`pct list`) {
+        next unless $line =~ /^\s*(\d+)\s+running\b/;
+        system($^X, $0, $1, 'apt-sync');
+    }
+    exit(0);
+}
+
+$phase //= '';
+
+if ($phase eq 'apt-sync') {
+    sync_apt();
+}
+elsif ($phase eq 'pre-start') {
     logmsg("$vmid is starting");
     check_and_mount_nfs();
     add_mounts();
@@ -668,6 +899,8 @@ if ($phase eq 'pre-start') {
 }
 elsif ($phase eq 'post-start') {
     sync_lud_ssh_key();
+    eval { sync_apt() };
+    logmsg("APT sync failed for $vmid: $@") if $@;
 }
 elsif ($phase eq 'pre-stop') {
     pre_stop_report();

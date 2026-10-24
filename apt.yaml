@@ -1,0 +1,29 @@
+# APT sources + config pushed into Debian containers on every start/reboot.
+#
+# Each entry name resolves to one or both of:
+#   apt.sources.d/<name>.sources  -> /etc/apt/sources.list.d/<name>.sources
+#                                    (deb822 only; @CODENAME@ is replaced with
+#                                    the container's release, e.g. trixie)
+#   apt.conf.d/<name>             -> /etc/apt/apt.conf.d/<name>
+#
+# A source's signing key goes to the path on its Signed-By: line. If
+# apt.sources.d/<name>.gpg.link exists, the key is downloaded from that URL
+# (cached on the host for a day); otherwise the key must already be in the
+# container (e.g. debian-archive-keyring for the Debian sources).
+#
+# Files the hook writes carry a "managed by hookscript" header: when an entry
+# stops applying (tag removed, hostname changed) its file is removed on the
+# next start. Hand-made files are never touched. Legacy one-line sources
+# (/etc/apt/sources.list, sources.list.d/*.list) are renamed to *.bak.
+
+# Every Debian container
+default: [debian, 00aptproxy]
+
+# Proxmox tag -> entries
+tags:
+  docker: [docker]
+
+# Container hostname (glob, matched against the full hostname and its first
+# label) -> entries
+hostnames:
+  emby: [emby]
