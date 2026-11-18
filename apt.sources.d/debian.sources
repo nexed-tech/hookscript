@@ -5,7 +5,7 @@ Components: main contrib
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
 Types: deb
-URIs: http://security.debian.org/
+URIs: http://security.debian.org/debian-security
 Suites: @CODENAME@-security
 Components: main contrib
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
