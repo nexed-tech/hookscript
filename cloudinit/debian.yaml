@@ -1,0 +1,27 @@
+#cloud-config for debian
+
+# 1. Configure APT Proxy
+apt:
+  proxy: "http:/aptcache.nexed.tech:80"
+
+# 2. Update & Install Default Apps (including qemu-guest-agent for Proxmox)
+package_update: true
+package_upgrade: true
+packages:
+  - curl
+  - git
+  - htop
+  - vim
+  - qemu-guest-agent
+  - fastfetch
+  - nala
+
+# 3. Start the QEMU Guest Agent immediately so Proxmox sees the VM's IP
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+
+# 4. Create Swap File
+swap:
+  filename: /swapfile
+  size: "auto"
+  maxsize: "4G"
