@@ -1055,6 +1055,7 @@ elsif ($phase eq 'pre-start') {
     logmsg("$vmid is starting");
 }
 elsif ($phase eq 'post-start') {
+    logmsg("$vmid started, guest sync running in the background (see /tmp/hook.log)");
     spawn_background('guest-sync');
 }
 elsif ($phase eq 'guest-sync') {
