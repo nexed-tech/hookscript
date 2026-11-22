@@ -18,10 +18,11 @@
 #   1. moves net0 to the VLAN's SDN VNet (`qm set`, applied live)
 #   2. registers the VM with the Cloudflare tunnel (`cft` / `cft-<port>` tag)
 #   3. waits for the guest agent
-#   4. writes a static /etc/network/interfaces from the VMID (network.yaml)
+#   4. sets the guest's hostname to the VM's name
+#   5. writes a static /etc/network/interfaces from the VMID (network.yaml)
 #      and brings the interface down and up again
-#   5. syncs the Linux Update Dashboard SSH key
-#   6. syncs APT sources/config/keys (apt.yaml)
+#   6. syncs the Linux Update Dashboard SSH key
+#   7. syncs APT sources/config/keys (apt.yaml)
 # post-stop removes the Cloudflare tunnel entry again.
 #
 # Not done for VMs (LXC-only): mount points.
@@ -756,6 +757,47 @@ sub cloudflare_post_stop {
 }
 
 # -------------------------
+# Hostname
+# -------------------------
+#
+# The guest's hostname follows the VM's `name:`, the way Proxmox does it for
+# containers: /etc/hostname gets the short name (first label), and the
+# 127.0.1.1 line in /etc/hosts becomes "<full name> <short name>" (or just
+# the short name when the VM name has no domain). Applied live with
+# `hostname`, no reboot.
+
+sub sync_guest_hostname {
+    my $name = get_hostname_from_config(read_config());
+    unless (defined $name && $name =~ /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i) {
+        logmsg("VM $vmid has no usable name ('" . ($name // '') . "'), skipping hostname");
+        return;
+    }
+    $name = lc $name;
+    my ($short) = split /\./, $name;
+    my $hosts_names = $name eq $short ? $short : "$name $short";
+
+    my $cur_hostname = guest_capture('cat', '/etc/hostname') =~ s/\s+$//r;
+    my ($cur_hosts)  = guest_capture('cat', '/etc/hosts') =~ /^127\.0\.1\.1[ \t]+(.*?)\s*$/m;
+    $cur_hosts = join ' ', split ' ', ($cur_hosts // '');
+    return if $cur_hostname eq $short && $cur_hosts eq $hosts_names;
+
+    my ($rc, $out) = guest_exec(undef, 'sh', '-c', q{
+        echo "$1" > /etc/hostname && hostname "$1" || exit 1
+        if grep -q '^127\.0\.1\.1[[:space:]]' /etc/hosts; then
+            sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t$2/" /etc/hosts
+        else
+            printf '127.0.1.1\t%s\n' "$2" >> /etc/hosts
+        fi
+    }, 'sh', $short, $hosts_names);
+
+    if ($rc == 0) {
+        logmsg("Set hostname of VM $vmid to $short" . ($name ne $short ? " ($name)" : ''));
+    } else {
+        logmsg("Setting hostname of VM $vmid to $short failed (exit $rc): $out");
+    }
+}
+
+# -------------------------
 # Linux Update Dashboard SSH key sync
 # -------------------------
 #
@@ -1076,7 +1118,7 @@ elsif ($phase eq 'guest-sync') {
         logmsg("VM $vmid has no guest agent enabled (agent: 1), skipping network/SSH key/APT sync");
     }
     elsif (wait_for_agent()) {
-        foreach my $step ([network => \&sync_guest_network], [ssh_key => \&sync_lud_ssh_key], [apt => \&sync_apt]) {
+        foreach my $step ([hostname => \&sync_guest_hostname], [network => \&sync_guest_network],[ssh_key => \&sync_lud_ssh_key], [apt => \&sync_apt]) {
             eval { $step->[1]->() };
             logmsg("$step->[0] sync failed for $vmid: $@") if $@;
         }
