@@ -1,4 +1,6 @@
-# Network addressing derived from VMID.
+# Network addressing derived from VMID. Used by hookscript.pl (LXC: sets the
+# NIC on the container config) and vm-hookscript.pl (VMs: writes
+# /etc/network/interfaces inside the guest; nameservers = the gateways).
 #
 # VMID format is VVOOO (5 digits):
 #   VV  = VLAN ID (picks the SDN VNet below), also the 3rd IP octet
