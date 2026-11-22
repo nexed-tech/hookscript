@@ -8,6 +8,8 @@ use YAML::XS 'LoadFile';
 use JSON::PP qw(encode_json decode_json);
 use Fcntl qw(:flock);
 use File::Basename qw(dirname basename);
+use Sys::Syslog qw(openlog syslog);
+openlog('hookscript', 'pid', 'user');
 
 my $vmid  = shift;
 my $phase = shift;
@@ -36,6 +38,10 @@ sub logmsg {
     open my $log, '>>', '/tmp/hook.log';
     print $log $line;
     close $log;
+
+    # Also to the journal: node -> System -> Syslog in the GUI, or
+    # `journalctl -t hookscript -f`
+    eval { syslog('info', '%s', $msg) };
 
     print STDOUT $line;
     STDOUT->flush();

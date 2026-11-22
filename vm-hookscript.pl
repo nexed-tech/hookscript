@@ -34,6 +34,8 @@ use YAML::XS 'LoadFile';
 use JSON::PP qw(encode_json decode_json);
 use Fcntl qw(:flock);
 use File::Basename qw(dirname basename);
+use Sys::Syslog qw(openlog syslog);
+openlog('hookscript', 'pid', 'user');
 
 my $vmid  = shift // '';
 my $phase = shift // '';
@@ -59,6 +61,11 @@ sub logmsg {
         print $log $line;
         close $log;
     }
+
+    # Also to the journal, same tag as the LXC hookscript: node -> System ->
+    # Syslog in the GUI, or `journalctl -t hookscript -f`. This is the only
+    # place the post-start background job shows up besides /tmp/hook.log.
+    eval { syslog('info', '%s', "[vm] $msg") };
 
     print STDOUT $line;
     STDOUT->flush();
