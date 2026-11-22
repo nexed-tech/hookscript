@@ -90,36 +90,60 @@ sub set_static_network {
     $vlan = int($vlan);
     $host = int($host);
 
-    my @allowed_vlans = @{ $netcfg->{vlans} || [] };
-    unless (grep { $_ == $vlan } @allowed_vlans) {
-        logmsg("VLAN $vlan (from VMID $vmid) not in allowed vlans list, skipping static IP");
+    my $vnet = ($netcfg->{vnets} || {})->{$vlan};
+    unless (defined $vnet && length $vnet) {
+        logmsg("VLAN $vlan (from VMID $vmid) has no SDN VNet in network.yaml, skipping static IP");
         return;
     }
 
-    my $base        = $netcfg->{network}{base};
-    my $cidr        = $netcfg->{network}{cidr};
-    my $gw_octet    = $netcfg->{gateway_overrides}{$vlan} // $netcfg->{network}{gateway_octet};
-    my %untagged    = map { $_ => 1 } @{ $netcfg->{untagged} || [] };
+    my $base     = $netcfg->{network}{base};
+    my $cidr     = $netcfg->{network}{cidr};
+    my $gw_octet = $netcfg->{gateway_overrides}{$vlan} // $netcfg->{network}{gateway_octet};
 
     my $ip = "$base.$vlan.$host";
     my $gw = "$base.$vlan.$gw_octet";
-    my $tag_part = $untagged{$vlan} ? '' : ",tag=$vlan";
+
+    # IPv6 reuses the same numbers literally (not hex): fd00:10::75, gw fd00:10::254
+    my $v6_prefix = $netcfg->{network}{ipv6_prefix};
+    my ($ip6, $gw6);
+    if (defined $v6_prefix && length $v6_prefix) {
+        my $v6_cidr = $netcfg->{network}{ipv6_cidr} // 64;
+        $ip6 = "${v6_prefix}:${vlan}::${host}/${v6_cidr}";
+        $gw6 = "${v6_prefix}:${vlan}::${gw_octet}";
+    }
 
     my @lines = read_config();
     my $changed = 0;
 
+    # A NIC is ours if it's still on DHCP (fresh clone) or already on the
+    # VMID-derived IP (set up earlier, possibly before the move to SDN). Both
+    # get put on the VLAN's VNet (the VNet tags, so any old `tag=` goes) and
+    # get the VMID-derived static IPv6.
     foreach my $line (@lines) {
-        if ($line =~ /^(net\d+):\s*(.*)$/) {
-            my ($netid, $rest) = ($1, $2);
-            next unless $rest =~ /(?:^|,)ip=dhcp(?:,|$)/;
+        next unless $line =~ /^(net\d+):\s*(.*)$/;
+        my ($netid, $rest) = ($1, $2);
+        my $is_dhcp = $rest =~ /(?:^|,)ip=dhcp(?:,|$)/;
+        my $is_ours = $rest =~ /(?:^|,)ip=\Q$ip\E\//;
+        next unless $is_dhcp || $is_ours;
 
-            $rest =~ s/(?:^|,)\Kip=dhcp/ip=$ip\/$cidr,gw=$gw/;
-            $rest .= $tag_part if $tag_part && $rest !~ /(?:^|,)tag=/;
-
-            logmsg("Setting $netid for $vmid to $ip/$cidr, gw $gw" . ($tag_part ? " (vlan $vlan)" : " (untagged, vlan $vlan)"));
-            $line = "$netid: $rest\n";
-            $changed = 1;
+        my $orig = $rest;
+        $rest =~ s/(?:^|,)\Kip=dhcp/ip=$ip\/$cidr,gw=$gw/ if $is_dhcp;
+        if ($rest =~ /(?:^|,)bridge=/) {
+            $rest =~ s/(?:^|,)\Kbridge=[^,]*/bridge=$vnet/;
+        } else {
+            $rest .= ",bridge=$vnet";
         }
+        if (defined $ip6) {
+            $rest =~ s/(?:^|,)\Kip6=[^,]*/ip6=$ip6/ or $rest .= ",ip6=$ip6";
+            $rest =~ s/(?:^|,)\Kgw6=[^,]*/gw6=$gw6/ or $rest .= ",gw6=$gw6";
+        }
+        $rest =~ s/,tag=\d+(?=,|$)//g;
+        $rest =~ s/^tag=\d+,//;
+        next if $rest eq $orig;
+
+        logmsg("Setting $netid for $vmid to $ip/$cidr, gw $gw" . (defined $ip6 ? ", $ip6, gw6 $gw6" : '') . " on vnet $vnet");
+        $line = "$netid: $rest\n";
+        $changed = 1;
     }
 
     write_config(@lines) if $changed;
@@ -787,9 +811,31 @@ sub apt_install_source {
     logmsg("Installed APT source $name into $vmid:$dst");
 }
 
+# A conf that points apt at a CA (`...::CaInfo "/path/x.crt";`, e.g. for an
+# HTTPS-caching proxy) gets that cert pushed to /path/x.crt first, taken from
+# apt.conf.d/x.crt. Cert before conf, so apt never sees a CaInfo pointing at
+# nothing. If the cert can't be pushed the conf isn't installed either.
 sub apt_install_conf {
     my ($name, $dst) = @_;
-    pct_push_content("// $APT_MARKER, do not edit\n" . slurp("$APT_CONF_DIR/$name"), $dst);
+    my $body = slurp("$APT_CONF_DIR/$name");
+
+    my %seen;
+    foreach my $line (split /\n/, $body) {
+        next if $line =~ m{^\s*(?:#|//)};
+        next unless $line =~ /CaInfo\s+"(\/[^"]+)"/i;
+        my $ca = $1;
+        next if $seen{$ca}++;
+
+        my $src = "$APT_CONF_DIR/" . basename($ca);
+        if (-s $src) {
+            pct_push_file($src, $ca);
+            logmsg("Installed APT CA cert " . basename($ca) . " into $vmid:$ca");
+        } elsif (!pct_run('test', '-s', $ca)) {
+            die "CA cert $ca missing in container and no apt.conf.d/" . basename($ca) . " to push, leaving the config as-is\n";
+        }
+    }
+
+    pct_push_content("// $APT_MARKER, do not edit\n$body", $dst);
     logmsg("Installed APT config $name into $vmid:$dst");
 }
 

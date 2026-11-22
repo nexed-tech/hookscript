@@ -1,11 +1,11 @@
 # Network addressing derived from VMID.
 #
 # VMID format is VVOOO (5 digits):
-#   VV  = VLAN ID, also used as the 3rd IP octet
+#   VV  = VLAN ID (picks the SDN VNet below), also the 3rd IP octet
 #   OOO = 4th IP octet
 #
-# Example: VMID 10075 -> VLAN 10, IP 192.168.10.75
-#          VMID 16241 -> VLAN 16, IP 192.168.16.241
+# Example: VMID 10075 -> VLAN 10, IP 192.168.10.75,  fd00:10::75
+#          VMID 16241 -> VLAN 16, IP 192.168.16.241, fd00:16::241
 #
 # To adapt this to a different network (e.g. 10.0.x.x instead of 192.168.x.x),
 # just change `base` below.
@@ -13,16 +13,24 @@ network:
   base: 192.168       # first two octets of the network
   cidr: 24
   gateway_octet: 254  # default gateway octet: base.<vlan>.<gateway_octet>
+  # IPv6 uses the same numbers, written as-is into the address (not converted
+  # to hex): VMID 10075 -> fd00:10::75/64, gw fd00:10::254.
+  # Remove ipv6_prefix to leave ip6= alone.
+  ipv6_prefix: fd00   # address is <ipv6_prefix>:<vlan>::<host>
+  ipv6_cidr: 64
 
 # Optional per-VLAN gateway overrides, for networks where the gateway isn't
 # on the same octet everywhere. Any VLAN not listed here uses gateway_octet
-# above. Example: `17: 1` would make the vlan 17 gateway 192.168.17.1
+# above (IPv4 and IPv6). Example: `17: 1` would make the vlan 17 gateway
+# 192.168.17.1 / fd00:17::1
 gateway_overrides: {}
 
-# VLANs that are valid targets for this scheme. Any VMID whose derived VLAN
-# isn't listed here is left alone (so normal/non-network-encoded VMIDs are safe).
-vlans: [10, 11, 16, 17]
-
-# VLANs that are untagged (native) on the LXC bridge - no `tag=` is added to
-# net0 for these. Everything else in `vlans` gets `tag=<vlan>`.
-untagged: [10]
+# VLAN -> Proxmox SDN VNet. The container's NIC is put on that VNet
+# (`bridge=<vnet>`); the VNet does the tagging, so no `tag=` is set.
+# Any VMID whose derived VLAN isn't listed here is left alone (so
+# normal/non-network-encoded VMIDs are safe).
+vnets:
+  10: v10serv
+  11: v11nzb
+  16: v16dmz
+  17: v17dev
