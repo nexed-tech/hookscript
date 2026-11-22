@@ -1,2 +1,5 @@
-Acquire::http { Proxy "http://aptcache.nexed.tech"; };
-Acquire::https { Proxy "http://aptcache.nexed.tech"; };
+#Acquire::http { Proxy "http://aptcache.nexed.tech"; };
+#Acquire::https { Proxy "http://aptcache.nexed.tech"; };
+Acquire::http::Proxy "http://192.168.10.11:3142";
+Acquire::https::Proxy "http://192.168.10.11:3142";
+Acquire::https::CaInfo "/etc/ssl/certs/apt-cacher-ultra-ca.crt";
