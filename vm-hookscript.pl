@@ -69,6 +69,7 @@ my $GUEST_EXEC_TIMEOUT = 60;   # seconds per `qm guest exec`
 sub journal_log {
     my ($msg, $kind) = @_;
     (my $one_line = $msg) =~ s/\s*\n\s*/ /g;
+    no warnings 'exec';    # no logger: syslog fallback below
     if (open my $j, '|-', 'logger', '--journald') {
         print $j "MESSAGE=$one_line\nPRIORITY=6\nSYSLOG_IDENTIFIER=$LOG_ID\nSYSLOG_PID=$$\nHOOKSCRIPT=$kind\n"
                . ($LOG_ID ne 'hookscript' ? "HOOKSCRIPT_VMID=$vmid\n" : '');
