@@ -1114,7 +1114,11 @@ sub sync_nfs_mounts {
 
     foreach my $dst (sort grep { !$want{$_} } keys %have) {
         guest_run('umount', '-l', $dst);
-        logmsg("VM $vmid: unmounted $dst (mount tag removed)");
+        # rmdir only removes an empty folder, so anything written into the
+        # mount point itself (not the share) stays
+        my $removed = guest_run('rmdir', $dst);
+        logmsg("VM $vmid: unmounted $dst (mount tag removed)"
+             . ($removed ? ', folder removed' : ', folder kept (not empty)'));
     }
 
     my $rest = $fstab;
