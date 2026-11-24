@@ -1,0 +1,11 @@
+[Unit]
+Description=Automatically extend root partition and filesystem
+After=local-fs.target
+Before=getty.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/auto-extend-disk.sh
+
+[Install]
+WantedBy=multi-user.target

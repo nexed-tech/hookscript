@@ -1,0 +1,13 @@
+[Unit]
+Description=First boot of a template clone: SSH host keys, apt proxy, full upgrade
+ConditionFirstBoot=yes
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/first-boot.sh
+TimeoutStartSec=30min
+
+[Install]
+WantedBy=multi-user.target
