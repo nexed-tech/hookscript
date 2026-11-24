@@ -32,7 +32,7 @@
 use strict;
 use warnings;
 use IO::Handle;
-use POSIX qw(setsid);
+use File::Spec;
 use YAML::XS 'LoadFile';
 use JSON::PP qw(encode_json decode_json);
 use Fcntl qw(:flock);
@@ -1231,22 +1231,20 @@ sub sync_docker_host {
 # Phase handling
 # -------------------------
 
-# Runs `vm-hookscript.pl <vmid> <phase>` detached from the hook, so the start
-# task (which holds the VM's config lock) doesn't wait for it.
+# Runs `vm-hookscript.pl <vmid> <phase>` as its own transient systemd unit
+# (vm-hookscript-<vmid>), so neither the start task (which holds the VM's
+# config lock) nor whoever ran `qm start` waits for it. A plain fork kept
+# file handles of the caller open, which made e.g. `ssh host qm start` hang
+# until the whole job was done. Same approach as proxdock-provision.sh.
+# If the unit still exists (a job from an earlier start is running), that
+# job carries on and no second one is started.
 sub spawn_background {
     my ($bg_phase) = @_;
-    my $pid = fork();
-    unless (defined $pid) {
-        logmsg("Cannot fork background $bg_phase job for $vmid: $!");
-        return;
-    }
-    return if $pid;
-
-    setsid();
-    open STDIN,  '<',  '/dev/null';
-    open STDOUT, '>',  '/dev/null';
-    open STDERR, '>>', '/tmp/hook.log';
-    exec($^X, $0, $vmid, $bg_phase) or exit(1);
+    my $unit = "vm-hookscript-$vmid";
+    my $rc = system('systemd-run', '--quiet', '--collect', '--no-block', "--unit=$unit",
+                    $^X, File::Spec->rel2abs($0), $vmid, $bg_phase);
+    logmsg("Background $bg_phase job for $vmid not started (systemd-run exit " . ($rc >> 8)
+         . "), is $unit from an earlier start still running?") if $rc;
 }
 
 # One background job per VM at a time (a quick reboot can start a second one).
