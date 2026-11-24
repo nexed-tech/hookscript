@@ -23,6 +23,8 @@
 #      and brings the interface down and up again
 #   6. syncs the Linux Update Dashboard SSH key
 #   7. syncs APT sources/config/keys (apt.yaml)
+#   8. `docker` tag: Docker + Hawser + Dockhand registration + stacks
+#      (see "Docker host" below)
 # post-stop removes the Cloudflare tunnel entry again.
 #
 # Not done for VMs (LXC-only): mount points.
@@ -1055,6 +1057,177 @@ sub sync_apt {
 }
 
 # -------------------------
+# Docker host (`docker` tag) -> Hawser -> Dockhand
+# -------------------------
+#
+# A VM tagged `docker` turns itself into a Docker host managed by Dockhand -
+# the VM counterpart of proxdock-provision.sh. Every step checks first and only
+# does what's missing, so it runs on every start: add a `stack-<name>` tag,
+# restart, and that stack gets deployed. Runs after the APT step, which has
+# already put the Docker apt repo in place (apt.yaml: tags: docker).
+#   1. wait for first-boot.service (a fresh clone's full upgrade holds dpkg)
+#   2. install Docker when `docker` is missing
+#   3. Hawser in /opt/stacks/hawser (compose.yaml from vm-template/hawser/);
+#      a token is generated only when .env has none, so the Dockhand
+#      connection survives restarts
+#   4. register in Dockhand + deploy BASE_STACK and the stack-<name> tags
+#      that Dockhand doesn't have yet (dockhand-register.sh, shared with LXC)
+# Long-running work goes through guest_run_long, so it isn't bound by the
+# agent's per-call timeout and survives the VM being restarted halfway.
+
+my $PROVISION_CONF   = '/etc/pve/proxdock/provision.conf';
+my $HAWSER_COMPOSE   = "$SNIPPETS/vm-template/hawser/compose.yaml";
+my $HAWSER_DIR       = '/opt/stacks/hawser';
+my $DOCKER_PACKAGES  = 'docker-ce docker-ce-cli containerd.io docker-compose-plugin';
+my $FIRST_BOOT_WAIT  = 30 * 60;   # matches first-boot.service's TimeoutStartSec
+my $LONG_STEP_WAIT   = 20 * 60;
+
+# Runs a shell script in the guest as a transient systemd unit and waits for
+# it. If that unit is still running (an earlier, interrupted job) it waits for
+# that one instead of starting another. Output goes to /var/log/<unit>.log in
+# the guest. Returns 1 when the script exited 0.
+sub guest_run_long {
+    my ($unit, $script, $max) = @_;
+    my $rcfile = "/run/$unit.rc";
+    my $state = guest_capture('systemctl', 'is-active', "$unit.service") =~ s/\s+//gr;
+
+    unless ($state eq 'active' || $state eq 'activating') {
+        my ($rc, $out) = guest_exec(undef, 'systemd-run', "--unit=$unit", '--collect', '--quiet',
+            '--property=Type=oneshot', 'sh', '-c',
+            "rm -f $rcfile; ( $script ) > /var/log/$unit.log 2>&1; echo \$? > $rcfile");
+        if ($rc != 0) {
+            logmsg("VM $vmid: starting $unit failed (exit $rc): $out");
+            return 0;
+        }
+    }
+
+    my $deadline = time + $max;
+    while (time < $deadline) {
+        $state = guest_capture('systemctl', 'is-active', "$unit.service") =~ s/\s+//gr;
+        last unless $state eq 'active' || $state eq 'activating';
+        sleep 10;
+    }
+    if ($state eq 'active' || $state eq 'activating') {
+        logmsg("VM $vmid: $unit still running after ${max}s, will check again on the next start");
+        return 0;
+    }
+
+    my $exit = guest_capture('cat', $rcfile) =~ s/\s+//gr;
+    return 1 if $exit eq '0';
+    my $tail = guest_capture('tail', '-n', '5', "/var/log/$unit.log") =~ s/\s+/ /gr;
+    logmsg("VM $vmid: $unit failed (exit " . ($exit eq '' ? '?' : $exit) . "): $tail");
+    return 0;
+}
+
+sub wait_for_first_boot {
+    my $deadline = time + $FIRST_BOOT_WAIT;
+    my $logged;
+    while (time < $deadline) {
+        my $state = guest_capture('systemctl', 'is-active', 'first-boot.service') =~ s/\s+//gr;
+        return 1 unless $state eq 'activating';
+        logmsg("VM $vmid: waiting for first-boot.service (upgrade) to finish") unless $logged++;
+        sleep 15;
+    }
+    logmsg("VM $vmid: first-boot.service still running after ${FIRST_BOOT_WAIT}s, skipping Docker setup this time");
+    return 0;
+}
+
+sub ensure_docker {
+    return 1 if guest_run('sh', '-c', 'command -v docker >/dev/null && docker info >/dev/null 2>&1');
+
+    unless (guest_run('sh', '-c', 'command -v docker >/dev/null')) {
+        logmsg("VM $vmid: installing Docker");
+        guest_run_long('hookscript-docker-install',
+            'export DEBIAN_FRONTEND=noninteractive; '
+          . 'apt-get -o DPkg::Lock::Timeout=600 update && '
+          . "apt-get -o DPkg::Lock::Timeout=600 install -y $DOCKER_PACKAGES && "
+          . 'systemctl enable --now docker',
+            $LONG_STEP_WAIT) or return 0;
+    } else {
+        guest_run('systemctl', 'enable', '--now', 'docker');
+    }
+
+    for (1 .. 30) {
+        if (guest_run('docker', 'info')) {
+            logmsg("VM $vmid: Docker is up");
+            return 1;
+        }
+        sleep 2;
+    }
+    logmsg("VM $vmid: Docker installed but `docker info` keeps failing");
+    return 0;
+}
+
+# Returns (token, token_is_new) once Hawser is running, or () on failure.
+sub ensure_hawser {
+    unless (-s $HAWSER_COMPOSE) {
+        logmsg("VM $vmid: $HAWSER_COMPOSE missing on the host, skipping Hawser");
+        return;
+    }
+
+    my $compose_changed = guest_capture('cat', "$HAWSER_DIR/compose.yaml") ne slurp($HAWSER_COMPOSE);
+    guest_push_file($HAWSER_COMPOSE, "$HAWSER_DIR/compose.yaml") if $compose_changed;
+
+    my $env = guest_capture('cat', "$HAWSER_DIR/.env");
+    my ($token) = $env =~ /^TOKEN=([0-9a-f]{16,})\s*$/m;
+    my $token_new = 0;
+    unless ($token) {
+        open my $rnd, '<:raw', '/dev/urandom' or die "open /dev/urandom: $!\n";
+        read($rnd, my $bytes, 24) == 24 or die "read /dev/urandom failed\n";
+        close $rnd;
+        $token = unpack('H*', $bytes);
+        my $rest = join '', grep { !/^TOKEN=/ } split /^/m, $env;
+        $rest .= "\n" if length $rest && $rest !~ /\n$/;
+        guest_push_content("${rest}TOKEN=$token\n", "$HAWSER_DIR/.env");
+        guest_run('chmod', '600', "$HAWSER_DIR/.env");
+        $token_new = 1;
+        logmsg("VM $vmid: generated a new Hawser token");
+    }
+
+    my $running = guest_capture('docker', 'inspect', '-f', '{{.State.Running}}', 'hawser') =~ /true/;
+    if (!$running || $compose_changed || $token_new) {
+        guest_run_long('hookscript-hawser',
+            "cd $HAWSER_DIR && docker compose up -d --quiet-pull" . ($token_new ? ' --force-recreate' : ''),
+            $LONG_STEP_WAIT) or return;
+        logmsg("VM $vmid: Hawser " . ($running ? 'restarted' : 'started'));
+    }
+    return ($token, $token_new);
+}
+
+sub sync_docker_host {
+    my @lines = read_config();
+    my @tags  = get_tags(@lines);
+    return unless grep { $_ eq 'docker' } @tags;
+
+    wait_for_first_boot() or return;
+    ensure_docker() or return;
+    my ($token, $token_new) = ensure_hawser() or return;
+
+    unless (-r $PROVISION_CONF) {
+        logmsg("VM $vmid: no $PROVISION_CONF, Docker + Hawser are up but not registering in Dockhand");
+        return;
+    }
+    my $name = get_hostname_from_config(@lines);
+    my $net  = derive_network();
+    unless ($name && $net) {
+        logmsg("VM $vmid: no name or no VMID-derived IP, can't register in Dockhand");
+        return;
+    }
+
+    my ($base) = slurp($PROVISION_CONF) =~ /^BASE_STACK=["']?([^"'\s]*)/m;
+    my @stacks = grep { length } ($base // ''), map { /^stack-(.+)$/ ? $1 : () } @tags;
+
+    open(my $fh, '-|', "$SNIPPETS/dockhand-register.sh", $name, $net->{ip}, $token, $token_new, @stacks)
+        or die "cannot run dockhand-register.sh: $!\n";
+    while (my $line = <$fh>) {
+        chomp $line;
+        logmsg("VM $vmid: $line") if length $line;
+    }
+    close $fh;
+    logmsg("VM $vmid: Dockhand registration failed (exit " . ($? >> 8) . ")") if $?;
+}
+
+# -------------------------
 # Phase handling
 # -------------------------
 
@@ -1118,7 +1291,8 @@ elsif ($phase eq 'guest-sync') {
         logmsg("VM $vmid has no guest agent enabled (agent: 1), skipping network/SSH key/APT sync");
     }
     elsif (wait_for_agent()) {
-        foreach my $step ([hostname => \&sync_guest_hostname], [network => \&sync_guest_network],[ssh_key => \&sync_lud_ssh_key], [apt => \&sync_apt]) {
+        foreach my $step ([hostname => \&sync_guest_hostname], [network => \&sync_guest_network],
+                          [ssh_key => \&sync_lud_ssh_key], [apt => \&sync_apt], [docker => \&sync_docker_host]) {
             eval { $step->[1]->() };
             logmsg("$step->[0] sync failed for $vmid: $@") if $@;
         }

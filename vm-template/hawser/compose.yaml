@@ -1,0 +1,15 @@
+services:
+    hawser:
+        container_name: hawser
+        restart: unless-stopped
+        env_file:
+            - .env
+        volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+            - /opt/stacks:/opt/stacks
+        environment:
+            - TOKEN=${TOKEN}
+            - STACKS_DIR=/opt/stacks
+        ports:
+            - 2376:2376
+        image: ghcr.io/finsys/hawser:latest

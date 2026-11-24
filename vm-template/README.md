@@ -23,6 +23,18 @@ Packages on top of a minimal netinst: `qemu-guest-agent`, `cloud-guest-utils`
 VM config: SeaBIOS, i440fx, `virtio0` on `linstor` (4 GB, `iothread=1`),
 `agent: 1`, `hookscript: local:snippets/vm-hookscript.pl`, boot `order=virtio0`.
 
+## Docker hosts
+
+Tag a clone `docker` (plus `stack-<name>` per stack) and `vm-hookscript.pl`
+turns it into a Dockhand-managed Docker host on its first start: Docker from
+the Docker apt repo, Hawser in `/opt/stacks/hawser` (compose file from
+`hawser/` in this folder, token generated once), registered in Dockhand under
+the VM name, and `BASE_STACK` plus the tagged stacks deployed
+(`dockhand-register.sh`, config in `/etc/pve/proxdock/provision.conf`). It
+re-checks on every start, so adding a `stack-<name>` tag and restarting
+deploys just that stack. Progress: `journalctl -t hookscript`, and
+`/var/log/hookscript-*.log` in the VM.
+
 ## Rebuilding / updating the template
 
 1. Full-clone 999001 to a temporary VM, start it, make the changes.
