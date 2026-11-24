@@ -115,7 +115,26 @@ for s in "${stacks[@]}"; do
 \"composePath\":\"$s/compose.yaml\",\"envFilePath\":\"$s/.env\",\"secretProviderId\":$provider_id,\
 \"envVars\":[{\"key\":\"HOST_IP\",\"value\":\"$ip\"}],\"deployNow\":true}"
     result=$(api POST /api/git/stacks "$body")
-    grep -Eq '"success" *: *true' <<<"$result" || fail "deploying $s: $(tail -c 400 <<<"$result")"
+    # Prints "ok", or "<stack id or empty> <error>". Dockhand answers with the
+    # stack plus deployResult; older/other answers have a top-level success.
+    verdict=$(python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    print(" not JSON: " + sys.argv[1][-300:]); sys.exit()
+r = d.get("deployResult") if isinstance(d.get("deployResult"), dict) else d
+if r.get("success"):
+    print("ok")
+else:
+    print("%s %s" % (d.get("id") or "", r.get("error") or r.get("message") or json.dumps(r)[-300:]))' "$result" <<<"$result")
+    if [ "$verdict" != ok ]; then
+        stack_id=${verdict%% *}
+        # Dockhand keeps a stack whose first deploy failed; remove it so the next
+        # start creates and deploys it again instead of skipping it as existing.
+        [ -n "$stack_id" ] && api DELETE "/api/git/stacks/$stack_id" >/dev/null
+        fail "deploying $s: ${verdict#* }${stack_id:+ (stack $stack_id removed again, retried on the next start)}"
+    fi
     echo "deployed stack $s"
 done
 exit 0
