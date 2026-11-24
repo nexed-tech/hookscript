@@ -13,7 +13,8 @@
 #     REPO_NAME) when Dockhand doesn't have it for this environment yet.
 #     Existing stacks are left alone: keeping them current is Dockhand's job.
 #
-# One output line per action; exits non-zero on the first failure.
+# One output line per action. Exits non-zero on the first failure, except for
+# stacks: a stack that fails to deploy is reported and the others still go ahead.
 #
 # Cluster-wide config: /etc/pve/proxdock/provision.conf
 #   DOCKHAND_URL=http://...:3000   REPO_NAME=stacks   SECRET_PROVIDER=<name> (optional)
@@ -109,6 +110,7 @@ if [ -n "$SECRET_PROVIDER" ]; then
 fi
 
 existing=$(api GET "/api/git/stacks?env=$env_id") || fail "listing stacks of $name"
+failed=0
 for s in "${stacks[@]}"; do
     [ -n "$(json_find stackName "$s" stackName <<<"$existing")" ] && continue
     body="{\"stackName\":\"$s\",\"environmentId\":$env_id,\"repositoryId\":$repo_id,\
@@ -133,8 +135,10 @@ else:
         # Dockhand keeps a stack whose first deploy failed; remove it so the next
         # start creates and deploys it again instead of skipping it as existing.
         [ -n "$stack_id" ] && api DELETE "/api/git/stacks/$stack_id" >/dev/null
-        fail "deploying $s: ${verdict#* }${stack_id:+ (stack $stack_id removed again, retried on the next start)}"
+        echo "FAILED: deploying $s: ${verdict#* }${stack_id:+ (stack $stack_id removed again, retried on the next start)}"
+        failed=1
+        continue
     fi
     echo "deployed stack $s"
 done
-exit 0
+exit $failed
