@@ -1,17 +1,29 @@
+# Mount tags. Same tag, same target path in LXC containers and VMs:
+#   LXC (hookscript.pl):    `mp` + `src` (the host's NFS mount) bind-mounted at `dst`
+#   VM (vm-hookscript.pl):  `nfs` mounted at `dst` by the guest itself (/etc/fstab)
 common:
   mp-s:
     mp: mp0
     src: /mnt/pve/nas01-shares
+    nfs: nas01.home.nexed.tech:/volume1/Shares
     dst: /mnt/Shares
   mp-b:
     mp: mp1
     src: /mnt/pve/nas01-backups
+    nfs: nas01.home.nexed.tech:/volume1/Backups
     dst: /mnt/Backups
   mp-p:
     mp: mp2
     src: /mnt/pve/nas01-backups-pbs
+    nfs: nas01.home.nexed.tech:/volume1/Backups-PBS
     dst: /mnt/Backups-PBS
   mp-a:
     mp: mp4
     src: /mnt/pve/nas01-appdata
+    nfs: nas01.home.nexed.tech:/volume1/AppData
     dst: /mnt/AppData
+
+# VMs: mount options for the `nfs` sources. _netdev,nofail: the VM still boots
+# when the NAS is down.
+vm:
+  nfs_options: vers=4.0,_netdev,nofail

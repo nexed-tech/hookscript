@@ -23,11 +23,11 @@
 #      and brings the interface down and up again
 #   6. syncs the Linux Update Dashboard SSH key
 #   7. syncs APT sources/config/keys (apt.yaml)
-#   8. `docker` tag: Docker + Hawser + Dockhand registration + stacks
+#   8. mount tags (mounts.yaml): NFS mounts in /etc/fstab, same paths as LXC
+#   9. `docker` tag: Docker + Hawser + Dockhand registration + stacks
 #      (see "Docker host" below)
 # post-stop removes the Cloudflare tunnel entry again.
 #
-# Not done for VMs (LXC-only): mount points.
 
 use strict;
 use warnings;
@@ -1057,6 +1057,95 @@ sub sync_apt {
 }
 
 # -------------------------
+# NFS mounts (mount tags from mounts.yaml)
+# -------------------------
+#
+# The VM counterpart of the LXC mount points: same tags (mp-s, mp-a, ...),
+# same target paths (`dst`), but the guest mounts the NAS export (`nfs`)
+# itself instead of getting a bind mount from the host. The entries live in a
+# marked block in /etc/fstab, rewritten from the tags on every start, and
+# stay there across stops: a reboot from inside the guest runs no hooks, so
+# the guest has to be able to mount them on its own. A tag that's removed
+# gets its share unmounted and dropped from the block. Needs nfs-common
+# (installed when missing) and the NAS export to allow the VM's subnet.
+
+my $FSTAB_BEGIN = '# BEGIN vm-hookscript NFS mounts (mounts.yaml, do not edit)';
+my $FSTAB_END   = '# END vm-hookscript NFS mounts';
+my $NFS_INSTALL_WAIT = 10 * 60;
+
+sub sync_nfs_mounts {
+    my $path = "$SNIPPETS/mounts.yaml";
+    return unless -e $path;
+    my $cfg = eval { LoadFile($path) };
+    if ($@) {
+        logmsg("Failed to load $path: $@");
+        return;
+    }
+
+    # Same merge as hookscript.pl: common, then this node's overrides
+    my %mounts = %{ $cfg->{common} || {} };
+    my $node = (split /\./, `hostname` // '')[0] // '';
+    $node =~ s/\s+//g;
+    if (my $ov = ($cfg->{hosts} || {})->{$node}) {
+        @mounts{ keys %$ov } = values %$ov;
+    }
+    my $opts = ($cfg->{vm} || {})->{nfs_options} // 'vers=4.0,_netdev,nofail';
+
+    my %want;    # dst -> nfs source
+    foreach my $tag (get_tags(read_config())) {
+        my $m = $mounts{$tag} or next;
+        next unless $m->{nfs} && $m->{dst};
+        $want{ $m->{dst} } = $m->{nfs};
+    }
+
+    my $fstab = guest_capture('cat', '/etc/fstab');
+    my ($block) = $fstab =~ /^\Q$FSTAB_BEGIN\E\n(.*?)^\Q$FSTAB_END\E\n?/ms;
+    my %have = map { (split ' ')[1] => 1 } grep { /\S/ && !/^\s*#/ } split /\n/, ($block // '');
+    return unless %want || %have;
+
+    if (%want && !guest_run('sh', '-c', 'test -x /sbin/mount.nfs || test -x /usr/sbin/mount.nfs')) {
+        logmsg("VM $vmid: installing nfs-common");
+        guest_run_long('hookscript-nfs-install',
+            'export DEBIAN_FRONTEND=noninteractive; '
+          . 'apt-get -o DPkg::Lock::Timeout=600 update && '
+          . 'apt-get -o DPkg::Lock::Timeout=600 install -y nfs-common',
+            $NFS_INSTALL_WAIT) or return;
+    }
+
+    foreach my $dst (sort grep { !$want{$_} } keys %have) {
+        guest_run('umount', '-l', $dst);
+        logmsg("VM $vmid: unmounted $dst (mount tag removed)");
+    }
+
+    my $rest = $fstab;
+    $rest =~ s/^\Q$FSTAB_BEGIN\E\n.*?^\Q$FSTAB_END\E\n?//ms;
+    $rest .= "\n" if length $rest && $rest !~ /\n$/;
+    my $new = $rest;
+    if (%want) {
+        $new .= "$FSTAB_BEGIN\n"
+              . join('', map { "$want{$_} $_ nfs $opts 0 0\n" } sort keys %want)
+              . "$FSTAB_END\n";
+    }
+    if ($new ne $fstab) {
+        guest_push_content($new, '/etc/fstab');
+        guest_run('systemctl', 'daemon-reload');
+    }
+
+    foreach my $dst (sort keys %want) {
+        next if guest_run('mountpoint', '-q', $dst);
+        guest_run('mkdir', '-p', $dst);
+        # timeout: a hard NFS mount to an unreachable NAS would otherwise hang
+        my ($rc, $out) = guest_exec(undef, 'sh', '-c', "timeout 40 mount '$dst' 2>&1");
+        if ($rc == 0) {
+            logmsg("VM $vmid: mounted $want{$dst} on $dst");
+        } else {
+            $out =~ s/\s+/ /g;
+            logmsg("VM $vmid: mounting $want{$dst} on $dst failed (exit $rc): $out");
+        }
+    }
+}
+
+# -------------------------
 # Docker host (`docker` tag) -> Hawser -> Dockhand
 # -------------------------
 #
@@ -1290,7 +1379,8 @@ elsif ($phase eq 'guest-sync') {
     }
     elsif (wait_for_agent()) {
         foreach my $step ([hostname => \&sync_guest_hostname], [network => \&sync_guest_network],
-                          [ssh_key => \&sync_lud_ssh_key], [apt => \&sync_apt], [docker => \&sync_docker_host]) {
+                          [ssh_key => \&sync_lud_ssh_key], [apt => \&sync_apt], [nfs => \&sync_nfs_mounts],
+                          [docker => \&sync_docker_host]) {
             eval { $step->[1]->() };
             logmsg("$step->[0] sync failed for $vmid: $@") if $@;
         }
