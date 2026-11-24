@@ -1,5 +1,5 @@
 # This service runs once at boot
-# It pulls the latest hookscript + mounts.yaml from Gitea, then re-syncs the
+# It pulls the latest hookscript + mounts.yaml from GitHub, then re-syncs the
 # APT sources/config/keys into every running container and VM (apt.yaml)
 
 # place in /etc/systemd/system/hooksync.service
@@ -7,7 +7,7 @@
 # systemctl enable hooksync.service
 
 [Unit]
-Description=Update Proxmox hookscript from Gitea
+Description=Update Proxmox hookscript from GitHub
 After=network-online.target
 Wants=network-online.target
 

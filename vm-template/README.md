@@ -42,8 +42,5 @@ VM config: SeaBIOS, i440fx, `virtio0` on `linstor` (4 GB, `iothread=1`),
   network in the background right after boot; the script retries the GitHub
   fetch (~2 min) and the upgrade to ride that out. Cleaner: have the hookscript
   trigger the upgrade once it's done with the network.
-- **The GitHub raw URL is hardcoded** (`nexed-tech/hookscript`, `main`). The
-  Proxmox hosts pull this repo from Gitea (`hooksync.service`); if GitHub is
-  only a mirror, consider pointing `first-boot.sh` at Gitea instead.
 - **Building the template is manual.** A script that does steps 1–4 above
   through the Proxmox API + guest agent would make it reproducible.

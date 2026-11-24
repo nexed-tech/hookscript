@@ -1,5 +1,5 @@
 # This service runs once at boot and daily
-# It pulls the latest hookscript + mounts.yaml from Gitea
+# It pulls the latest hookscript + mounts.yaml from GitHub
 
 # place in /etc/systemd/system/hooksync.timer
 # systemctl daemon-reload
