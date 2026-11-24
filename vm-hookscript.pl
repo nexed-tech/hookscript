@@ -23,8 +23,10 @@
 #      and brings the interface down and up again
 #   6. syncs the Linux Update Dashboard SSH key
 #   7. syncs APT sources/config/keys (apt.yaml)
-#   8. mount tags (mounts.yaml): NFS mounts in /etc/fstab, same paths as LXC
-#   9. `docker` tag: Docker + Hawser + Dockhand registration + stacks
+#   8. template base for VMs not cloned from the template: disk growth, zram
+#      swap, swap on disk replaced (see "Template base" below)
+#   9. mount tags (mounts.yaml): NFS mounts in /etc/fstab, same paths as LXC
+#  10. `docker` tag: Docker + Hawser + Dockhand registration + stacks
 #      (see "Docker host" below)
 # post-stop removes the Cloudflare tunnel entry again.
 #
@@ -38,10 +40,11 @@ use JSON::PP qw(encode_json decode_json);
 use Fcntl qw(:flock);
 use File::Basename qw(dirname basename);
 use Sys::Syslog qw(openlog syslog);
-openlog('hookscript', 'pid', 'user');
 
 my $vmid  = shift // '';
 my $phase = shift // '';
+my $LOG_ID = $vmid =~ /^\d+$/ ? "hookscript-$vmid" : 'hookscript';
+openlog($LOG_ID, 'pid', 'user');
 my $conf_file = "/etc/pve/qemu-server/${vmid}.conf";
 
 my $SNIPPETS        = '/var/lib/vz/snippets';
@@ -56,6 +59,24 @@ my $APT_MARKER      = 'managed by hookscript (apt.yaml)';
 my $AGENT_WAIT         = 300;  # seconds to wait for the guest agent after boot
 my $GUEST_EXEC_TIMEOUT = 60;   # seconds per `qm guest exec`
 
+# Also to the journal, as `hookscript-<vmid>` (identifier shown in the GUI's
+# node -> System -> Syslog; search there for hookscript-17250, or just
+# hookscript for all), with fields for exact filtering on the shell:
+#   journalctl -t hookscript-17250 -f       one VM
+#   journalctl HOOKSCRIPT_VMID=17250        the same, by field
+#   journalctl HOOKSCRIPT=vm                all VM hooks (lxc: all container hooks)
+# Falls back to plain syslog when `logger --journald` isn't available.
+sub journal_log {
+    my ($msg, $kind) = @_;
+    (my $one_line = $msg) =~ s/\s*\n\s*/ /g;
+    if (open my $j, '|-', 'logger', '--journald') {
+        print $j "MESSAGE=$one_line\nPRIORITY=6\nSYSLOG_IDENTIFIER=$LOG_ID\nSYSLOG_PID=$$\nHOOKSCRIPT=$kind\n"
+               . ($LOG_ID ne 'hookscript' ? "HOOKSCRIPT_VMID=$vmid\n" : '');
+        return if close $j;
+    }
+    eval { syslog('info', '%s', $one_line) };
+}
+
 sub logmsg {
     my ($msg) = @_;
     my $line = scalar(localtime) . " [vm] $msg\n";
@@ -65,10 +86,9 @@ sub logmsg {
         close $log;
     }
 
-    # Also to the journal, same tag as the LXC hookscript: node -> System ->
-    # Syslog in the GUI, or `journalctl -t hookscript -f`. This is the only
-    # place the post-start background job shows up besides /tmp/hook.log.
-    eval { syslog('info', '%s', "[vm] $msg") };
+    # The journal is the only place besides /tmp/hook.log where the post-start
+    # background job shows up.
+    journal_log("[vm] $msg", 'vm');
 
     print STDOUT $line;
     STDOUT->flush();
@@ -1057,6 +1077,96 @@ sub sync_apt {
 }
 
 # -------------------------
+# Template base: disk growth + zram swap
+# -------------------------
+#
+# Gives any Debian VM what the template has built in, so the hookscript can be
+# attached to VMs that weren't cloned from it:
+#   - cloud-guest-utils (growpart) + systemd-zram-generator, when missing
+#   - from vm-template/: auto-extend-disk.sh + .service + udev rule (root
+#     grows at boot and on a live `qm resize`), zram-generator.conf
+#   - zram swap started
+#   - swap on disk (partition, LVM volume or file) replaced by zram, and its
+#     space given to root: vm-template/remove-disk-swap.sh, only once zram swap
+#     is active. A VM tagged `keep-swap` keeps its swap on disk.
+# On a template clone everything is already in place and nothing happens.
+
+my @BASE_FILES = (
+    # [file in vm-template/, path in the guest, mode]
+    ['auto-extend-disk.sh',       '/usr/local/sbin/auto-extend-disk.sh',          '755'],
+    ['remove-disk-swap.sh',       '/usr/local/sbin/remove-disk-swap.sh',          '755'],
+    ['auto-extend-disk.service',  '/etc/systemd/system/auto-extend-disk.service', '644'],
+    ['90-auto-extend-disk.rules', '/etc/udev/rules.d/90-auto-extend-disk.rules',  '644'],
+    ['zram-generator.conf',       '/etc/systemd/zram-generator.conf',             '644'],
+);
+my $BASE_INSTALL_WAIT = 10 * 60;
+
+sub zram_swap_active {
+    return guest_capture('swapon', '--show=NAME', '--noheadings') =~ m{^/dev/zram}m;
+}
+
+sub sync_template_base {
+    my $os = guest_capture('cat', '/etc/os-release');
+    return unless $os =~ /^ID="?debian"?$/m;
+
+    unless (guest_run('sh', '-c', 'command -v growpart >/dev/null && test -e /usr/lib/systemd/system-generators/zram-generator')) {
+        logmsg("VM $vmid: installing cloud-guest-utils + systemd-zram-generator");
+        guest_run_long('hookscript-base-install',
+            'export DEBIAN_FRONTEND=noninteractive; '
+          . 'apt-get -o DPkg::Lock::Timeout=600 update && '
+          . 'apt-get -o DPkg::Lock::Timeout=600 install -y cloud-guest-utils systemd-zram-generator',
+            $BASE_INSTALL_WAIT) or return;
+    }
+
+    my @changed;
+    foreach my $f (@BASE_FILES) {
+        my ($name, $dst, $mode) = @$f;
+        my $src = "$SNIPPETS/vm-template/$name";
+        next unless -s $src;
+        next if guest_capture('cat', $dst) eq slurp($src);
+        guest_push_file($src, $dst);
+        guest_run('chmod', $mode, $dst);
+        push @changed, $name;
+    }
+    if (@changed) {
+        guest_run('systemctl', 'daemon-reload');
+        guest_run('udevadm', 'control', '--reload');
+        guest_run('systemctl', 'enable', '--quiet', 'auto-extend-disk.service');
+        logmsg("VM $vmid: installed @changed");
+    }
+
+    unless (zram_swap_active()) {
+        guest_run('systemctl', 'daemon-reload');
+        guest_run('systemctl', 'start', 'systemd-zram-setup@zram0.service');
+        guest_run('systemctl', 'start', 'dev-zram0.swap');
+        if (zram_swap_active()) {
+            logmsg("VM $vmid: zram swap active");
+        } else {
+            logmsg("VM $vmid: zram swap didn't start, keeping any swap on disk");
+            return;
+        }
+    }
+
+    my $disk_swap = guest_run('sh', '-c',
+        q{swapon --show=NAME --noheadings | grep -qv '^/dev/zram' || awk '$1 !~ /^#/ && $3 == "swap"' /etc/fstab | grep -q .});
+    if ($disk_swap && grep { $_ eq 'keep-swap' } get_tags(read_config())) {
+        return;
+    }
+    if ($disk_swap) {
+        logmsg("VM $vmid: replacing swap on disk by zram swap");
+        my $ok = guest_run_long('hookscript-remove-disk-swap', '/usr/local/sbin/remove-disk-swap.sh', $BASE_INSTALL_WAIT);
+        foreach my $line (split /\n/, guest_capture('cat', '/var/log/hookscript-remove-disk-swap.log')) {
+            logmsg("VM $vmid: $1") if $line =~ /^remove-disk-swap: (.*)/;
+        }
+        return unless $ok;
+    }
+    elsif (grep { $_ eq 'auto-extend-disk.sh' } @changed) {
+        # just installed: grow root now instead of waiting for the next boot
+        guest_run('systemctl', 'start', 'auto-extend-disk.service');
+    }
+}
+
+# -------------------------
 # NFS mounts (mount tags from mounts.yaml)
 # -------------------------
 #
@@ -1383,7 +1493,7 @@ elsif ($phase eq 'guest-sync') {
     }
     elsif (wait_for_agent()) {
         foreach my $step ([hostname => \&sync_guest_hostname], [network => \&sync_guest_network],
-                          [ssh_key => \&sync_lud_ssh_key], [apt => \&sync_apt], [nfs => \&sync_nfs_mounts],
+                          [ssh_key => \&sync_lud_ssh_key], [apt => \&sync_apt], [base => \&sync_template_base], [nfs => \&sync_nfs_mounts],
                           [docker => \&sync_docker_host]) {
             eval { $step->[1]->() };
             logmsg("$step->[0] sync failed for $vmid: $@") if $@;

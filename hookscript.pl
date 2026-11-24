@@ -9,10 +9,11 @@ use JSON::PP qw(encode_json decode_json);
 use Fcntl qw(:flock);
 use File::Basename qw(dirname basename);
 use Sys::Syslog qw(openlog syslog);
-openlog('hookscript', 'pid', 'user');
 
 my $vmid  = shift;
 my $phase = shift;
+my $LOG_ID = defined $vmid && $vmid =~ /^\d+$/ ? "hookscript-$vmid" : 'hookscript';
+openlog($LOG_ID, 'pid', 'user');
 my $conf_file = "/etc/pve/lxc/${vmid}.conf";
 my $hostname  = hostname();
 
@@ -31,6 +32,24 @@ if (exists $config->{hosts}{$hostname}) {
     @mounts{ keys %$overrides } = values %$overrides;
 }
 
+# Also to the journal, as `hookscript-<vmid>` (identifier shown in the GUI's
+# node -> System -> Syslog; search there for hookscript-10011, or just
+# hookscript for all), with fields for exact filtering on the shell:
+#   journalctl -t hookscript-10011 -f       one guest
+#   journalctl HOOKSCRIPT_VMID=10011        the same, by field
+#   journalctl HOOKSCRIPT=lxc               all container hooks (vm: all VM hooks)
+# Falls back to plain syslog when `logger --journald` isn't available.
+sub journal_log {
+    my ($msg, $kind) = @_;
+    (my $one_line = $msg) =~ s/\s*\n\s*/ /g;
+    if (open my $j, '|-', 'logger', '--journald') {
+        print $j "MESSAGE=$one_line\nPRIORITY=6\nSYSLOG_IDENTIFIER=$LOG_ID\nSYSLOG_PID=$$\nHOOKSCRIPT=$kind\n"
+               . ($LOG_ID ne 'hookscript' ? "HOOKSCRIPT_VMID=$vmid\n" : '');
+        return if close $j;
+    }
+    eval { syslog('info', '%s', $one_line) };
+}
+
 sub logmsg {
     my ($msg) = @_;
     my $line = scalar(localtime) . " $msg\n";
@@ -39,9 +58,7 @@ sub logmsg {
     print $log $line;
     close $log;
 
-    # Also to the journal: node -> System -> Syslog in the GUI, or
-    # `journalctl -t hookscript -f`
-    eval { syslog('info', '%s', $msg) };
+    journal_log($msg, 'lxc');
 
     print STDOUT $line;
     STDOUT->flush();

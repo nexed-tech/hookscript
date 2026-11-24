@@ -40,7 +40,7 @@ the Docker apt repo, Hawser in `/opt/stacks/hawser` (compose file from
 the VM name, and `BASE_STACK` plus the tagged stacks deployed
 (`dockhand-register.sh`, config in `/etc/pve/proxdock/provision.conf`). It
 re-checks on every start, so adding a `stack-<name>` tag and restarting
-deploys just that stack. Progress: `journalctl -t hookscript`, and
+deploys just that stack. Progress: `journalctl -t hookscript-<vmid>`, and
 `/var/log/hookscript-*.log` in the VM.
 
 ## Rebuilding / updating the template
