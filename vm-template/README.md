@@ -23,6 +23,14 @@ Packages on top of a minimal netinst: `qemu-guest-agent`, `cloud-guest-utils`
 VM config: SeaBIOS, i440fx, `virtio0` on `linstor` (4 GB, `iothread=1`),
 `agent: 1`, `hookscript: local:snippets/vm-hookscript.pl`, boot `order=virtio0`.
 
+## NFS mounts
+
+The same mount tags as the LXC containers (`mp-s`, `mp-b`, `mp-p`, `mp-a` in
+`mounts.yaml`) work on VMs and mount at the same paths (`/mnt/Shares`, ...).
+The VM mounts the NAS export itself via a marked block in `/etc/fstab`
+(`nfs-common` is installed when needed), so the mounts also come back after a
+reboot from inside the VM. Removing a tag unmounts that share on the next start.
+
 ## Docker hosts
 
 Tag a clone `docker` (plus `stack-<name>` per stack) and `vm-hookscript.pl`
