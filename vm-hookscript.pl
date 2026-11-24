@@ -77,8 +77,12 @@ sub journal_log {
     eval { syslog('info', '%s', $one_line) };
 }
 
+# Counted for the guest-sync closing line
+our $LOG_PROBLEMS = 0;
+
 sub logmsg {
     my ($msg) = @_;
+    $LOG_PROBLEMS++ if $msg =~ /\bfail|giving up|not reachable|didn't start|still running after/i;
     my $line = scalar(localtime) . " [vm] $msg\n";
 
     if (open my $log, '>>', '/tmp/hook.log') {
@@ -1482,7 +1486,8 @@ elsif ($phase eq 'post-start') {
     spawn_background('guest-sync');
 }
 elsif ($phase eq 'guest-sync') {
-    my $lock = lock_vm_job();
+    my $lock    = lock_vm_job();
+    my $started = time;
     eval { sync_net0_bridge() };
     logmsg("Bridge setup failed for $vmid: $@") if $@;
     eval { cloudflare_register() };
@@ -1499,6 +1504,11 @@ elsif ($phase eq 'guest-sync') {
             logmsg("$step->[0] sync failed for $vmid: $@") if $@;
         }
     }
+
+    # Closing line, so the log shows the job is done (and not still busy or stuck)
+    my $secs = time - $started;
+    logmsg(sprintf("VM %s: guest sync done in %dm%02ds%s", $vmid, int($secs / 60), $secs % 60,
+                   $LOG_PROBLEMS ? ", with $LOG_PROBLEMS problem(s), see the lines above" : ''));
 }
 elsif ($phase eq 'pre-stop') {
     cloudflare_pre_stop_report();

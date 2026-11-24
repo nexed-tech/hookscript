@@ -111,8 +111,12 @@ fi
 
 existing=$(api GET "/api/git/stacks?env=$env_id") || fail "listing stacks of $name"
 failed=0
+already=()
 for s in "${stacks[@]}"; do
-    [ -n "$(json_find stackName "$s" stackName <<<"$existing")" ] && continue
+    if [ -n "$(json_find stackName "$s" stackName <<<"$existing")" ]; then
+        already+=("$s")
+        continue
+    fi
     body="{\"stackName\":\"$s\",\"environmentId\":$env_id,\"repositoryId\":$repo_id,\
 \"composePath\":\"$s/compose.yaml\",\"envFilePath\":\"$s/.env\",\"secretProviderId\":$provider_id,\
 \"envVars\":[{\"key\":\"HOST_IP\",\"value\":\"$ip\"}],\"deployNow\":true}"
@@ -141,4 +145,5 @@ else:
     fi
     echo "deployed stack $s"
 done
+[ ${#already[@]} -gt 0 ] && echo "already deployed: ${already[*]}"
 exit $failed
