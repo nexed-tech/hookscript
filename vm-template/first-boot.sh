@@ -1,29 +1,15 @@
 #!/bin/bash
 # First start of a clone of the deb13 template (first-boot.service, ConditionFirstBoot):
 #   1. fresh SSH host keys (the template is sealed without any)
-#   2. apt proxy config + its CA cert pulled from GitHub (nexed-tech/hookscript)
-#   3. full upgrade, through the proxy first, direct if the proxy doesn't work
-REPO=https://raw.githubusercontent.com/nexed-tech/hookscript/main/apt.conf.d
+#   2. full upgrade with the guest's APT config, direct if that doesn't work
+#
+# The template has no apt proxy config: the hookscript pushes 00aptproxy when
+# the host's profile wants it (profiles/<profile>/apt.yaml), so a clone on a
+# host without the cache never gets it. The cache's CA cert is in the template
+# (/etc/ssl/certs/apt-cacher-ultra-ca.crt) and does nothing without the proxy.
 log() { echo "first-boot: $*"; }
 
 ssh-keygen -A
-
-fetch() {
-    curl -fsSL --max-time 20 -o "$tmp/00aptproxy" "$REPO/00aptproxy" &&
-    curl -fsSL --max-time 20 -o "$tmp/ca.crt" "$REPO/apt-cacher-ultra-ca.crt"
-}
-
-# network-online can be reached before DHCP/DNS actually work, so keep trying for ~2 minutes
-tmp=$(mktemp -d)
-for i in $(seq 12); do fetch && break; sleep 10; done
-if [ -s "$tmp/00aptproxy" ] && [ -s "$tmp/ca.crt" ]; then
-    install -m 644 "$tmp/ca.crt" /etc/ssl/certs/apt-cacher-ultra-ca.crt
-    install -m 644 "$tmp/00aptproxy" /etc/apt/apt.conf.d/00aptproxy
-    log "apt proxy config pulled from GitHub"
-else
-    log "could not fetch apt proxy config from GitHub, keeping the current one"
-fi
-rm -rf "$tmp"
 
 export DEBIAN_FRONTEND=noninteractive
 # Recover from an install that was interrupted earlier (power loss, reboot mid-upgrade)
@@ -40,11 +26,11 @@ DIRECT=(-o Acquire::http::Proxy=false -o Acquire::https::Proxy=false
 
 # The hookscript may still be reconfiguring the network right after boot, hence the retries
 for i in 1 2; do
-    upgrade && { log "upgrade done (via proxy)"; exit 0; }
-    log "upgrade via proxy failed (attempt $i), retrying in 30s"; sleep 30
+    upgrade && { log "upgrade done"; exit 0; }
+    log "upgrade failed (attempt $i), retrying in 30s"; sleep 30
 done
 for i in 1 2 3; do
-    upgrade "${DIRECT[@]}" && { log "upgrade done (direct, proxy unavailable)"; exit 0; }
+    upgrade "${DIRECT[@]}" && { log "upgrade done (direct, without proxy)"; exit 0; }
     log "direct upgrade failed (attempt $i), retrying in 30s"; sleep 30
 done
 log "upgrade failed, giving up"
