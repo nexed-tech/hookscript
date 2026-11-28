@@ -1,0 +1,8 @@
+# apt.yaml for the VPS hosts: like profiles/home/apt.yaml, minus the home APT
+# proxy (00aptproxy). Entries come from apt.sources.d/ and apt.conf.d/ in the
+# snippets folder, shared by all profiles.
+default: [debian]
+
+tags:
+  docker: [docker]
+  tailscale: [tailscale]

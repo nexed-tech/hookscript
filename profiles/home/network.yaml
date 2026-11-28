@@ -1,6 +1,7 @@
-# Network addressing derived from VMID. Used by hookscript.pl (LXC: sets the
-# NIC on the container config) and vm-hookscript.pl (VMs: writes
-# /etc/network/interfaces inside the guest; nameservers = the gateways).
+# Network addressing derived from VMID (home profile). Used by
+# steps/pre-start/30-network.pl (containers: NIC in the container config; ipam
+# mode: IPAM reservation), steps/post-start/10-bridge.pl and 40-network.pl (VMs:
+# VNet + /etc/network/interfaces inside the guest; nameservers = the gateways).
 #
 # VMID format is VVOOO (5 digits):
 #   VV  = VLAN ID (picks the SDN VNet below), also the 3rd IP octet
@@ -10,14 +11,10 @@
 #          VMID 16241 -> VLAN 16, IP 192.168.16.241, fd00:16::241
 #
 # A one-digit network number works too (VMID VOOO): VMID 2075 -> 10.0.2.75
-# with base 10.0. The VPS hosts use that, see vps/network.yaml.
+# with base 10.0. The VPS hosts use that, see profiles/vps/network.yaml.
 #
 # To adapt this to a different network (e.g. 10.0.x.x instead of 192.168.x.x),
-# just change `base` below.
-#
-# Hosts that need their own settings put a copy of this file (and/or
-# mounts.yaml, apt.yaml) in /etc/pve/hookscript/ - that copy wins over this
-# one and isn't touched by hooksync's nightly `git pull`.
+# just change `base` below - or override it per node in profile.json.
 #
 # mode:
 #   static (default) - containers get ip=/gw= (+ ip6=) in their config, VMs a

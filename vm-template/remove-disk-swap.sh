@@ -1,6 +1,6 @@
 #!/bin/bash
 # Replaces swap on disk (partition, LVM volume or file) by the zram swap, and
-# gives the freed space to the root filesystem. Run by vm-hookscript.pl (as the
+# gives the freed space to the root filesystem. Run by hookscript.pl (steps/post-start/70-template-base.pl, as the
 # transient unit hookscript-remove-disk-swap) once zram swap is active; output
 # in /var/log/hookscript-remove-disk-swap.log.
 #

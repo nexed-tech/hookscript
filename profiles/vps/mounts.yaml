@@ -1,0 +1,2 @@
+# mounts.yaml for the VPS hosts: no NAS there, so no managed mounts.
+common: {}

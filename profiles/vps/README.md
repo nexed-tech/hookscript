@@ -1,8 +1,8 @@
-# Hookscripts on the VPS hosts
+# Profile `vps`: the single-IP VPS hosts
 
-Per-host config for the single-IP VPS Proxmox hosts (vps1, vps2, ...). Guests sit
-on an SDN Simple zone behind SNAT; their address is reserved in SDN IPAM from the
-VMID (`network.yaml` `mode: ipam`).
+For the VPS Proxmox hosts (vps1, vps2, ...). Guests sit on an SDN Simple zone
+behind SNAT; their address is reserved in SDN IPAM from the VMID
+(`network.yaml` `mode: ipam`). No NAS mounts; APT without the home proxy.
 
 ## Setup on a VPS host
 
@@ -14,10 +14,14 @@ rm -rf /var/lib/vz/snippets && git clone https://github.com/nexed-tech/hookscrip
 cp /var/lib/vz/snippets/hooksync.service /var/lib/vz/snippets/hooksync.timer /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now hooksync.timer
 
-# this host's config (not in git, so hooksync's pull never overwrites it)
-mkdir -p /etc/pve/hookscript
-cp /var/lib/vz/snippets/vps/{network,mounts,apt}.yaml /etc/pve/hookscript/
-# then set the network number in /etc/pve/hookscript/network.yaml (`vnets:`)
+# this node's profile (gitignored, so hooksync's pull never touches it);
+# "2" is the network number: vps1 -> "1", vps2 -> "2", ...
+cat > /var/lib/vz/snippets/profile.json <<'JSON'
+{
+  "profile": "vps",
+  "overrides": { "network": { "vnets": { "2": "vnet0" } } }
+}
+JSON
 ```
 
 SDN (Datacenter -> SDN): Simple zone with DHCP `dnsmasq` + IPAM `pve`, VNet
@@ -25,11 +29,11 @@ SDN (Datacenter -> SDN): Simple zone with DHCP `dnsmasq` + IPAM `pve`, VNet
 the top of the /24 (e.g. `.200`-`.210`). VMIDs whose last three digits fall in
 that range keep a pool address.
 
-Attach to guests as usual:
+Attach to containers and VMs alike:
 
 ```sh
 pct set <vmid> --hookscript local:snippets/hookscript.pl
-qm  set <vmid> --hookscript local:snippets/vm-hookscript.pl
+qm  set <vmid> --hookscript local:snippets/hookscript.pl
 ```
 
 Without `.env.secrets` in the snippets folder, the Cloudflare tunnel (`cft`) and
