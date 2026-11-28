@@ -24,9 +24,13 @@ foreach my $module (@MODULES) {
     require $file;
 }
 
+require Exporter;
+
+# The modules use Exporter's import without inheriting from it, so
+# export_to_level is called as a function.
 sub import {
     no strict 'refs';
-    $_->export_to_level(1, $_, @{"${_}::EXPORT"}) foreach @MODULES;
+    Exporter::export_to_level($_, 1, $_, @{"${_}::EXPORT"}) foreach @MODULES;
 }
 
 1;
