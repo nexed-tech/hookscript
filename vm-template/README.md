@@ -12,7 +12,7 @@ keys, APT sources).
 | `auto-extend-disk.service` | `/etc/systemd/system/` (enabled) | Runs the script at boot. No `RemainAfterExit`, so it can be started again. |
 | `90-auto-extend-disk.rules` | `/etc/udev/rules.d/` | Starts the service on a live resize (`qm resize` → kernel `RESIZE=1` change event). No reboot needed. |
 | `zram-generator.conf` | `/etc/systemd/` | Swap on zram (half of RAM, zstd). Needs `systemd-zram-generator`. No swapfile/partition: nothing replicated by DRBD, nothing in backups, nothing in the way of growing the disk. |
-| `first-boot.sh` | `/usr/local/sbin/` | First start of a clone: SSH host keys, apt proxy config + CA cert from GitHub (`apt.conf.d/` in this repo), full upgrade (proxy first, direct fallback). |
+| `first-boot.sh` | `/usr/local/sbin/` | First start of a clone: SSH host keys, full upgrade (the guest's APT config first, direct fallback). No apt proxy config is baked in or fetched: the hookscript pushes `00aptproxy` when the host's profile lists it (`profiles/home/apt.yaml` does, `profiles/vps` doesn't). |
 | `first-boot.service` | `/etc/systemd/system/` (enabled) | `ConditionFirstBoot=yes`: only runs while `/etc/machine-id` says `uninitialized`, i.e. on a fresh clone. |
 | `ssh-hostkeys.conf` | `/etc/systemd/system/ssh.service.d/hostkeys.conf` | `ssh-keygen -A` before sshd starts, so sshd never fails on a sealed image. |
 | `seal.sh` | (run once, not installed) | Last step before `qm template`: clears machine-id, SSH host keys, apt cache, logs, DHCP leases. |
@@ -52,9 +52,9 @@ deploys just that stack. Progress: `journalctl -t hookscript-<vmid>`, and
 
 ## Known issues / TODO
 
-- **Proxy path of `first-boot.sh` untested.** At build time the apt cache
-  (`192.168.10.11:3142`, apt-cacher-ultra) answered 502; the direct fallback
-  was tested end to end.
+- **`first-boot.sh` usually upgrades direct on the home network.** The
+  hookscript pushes `00aptproxy` from the guest agent after boot, which is
+  often after the upgrade has started; later apt runs use the cache.
 - **`ci-debian.yaml` is outdated** for this template: it creates a 4 GB
   swapfile, and its apt proxy line is malformed (`http:/aptcache...`, one
   slash). The template doesn't use cloud-init; either fix or remove it.
