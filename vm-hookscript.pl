@@ -9,9 +9,11 @@
 # qemu-guest-agent installed. Without the agent only the Cloudflare tunnel
 # step runs.
 #
-# Nothing happens at pre-start: Proxmox reads the VM config (and builds the
-# cloud-init drive) before running pre-start and never re-reads it, so config
-# edits made there don't apply to that start anyway. post-start, on the other
+# pre-start only reserves the VMID-derived IP in SDN IPAM (network.yaml
+# `mode: ipam`, see "SDN IPAM reservation"): Proxmox reads the VM config (and
+# builds the cloud-init drive) before running pre-start and never re-reads it,
+# so config edits made there don't apply to that start anyway - but the IPAM
+# entry lives outside the VM config and is read later. post-start, on the other
 # hand, still holds the VM's config lock and the agent isn't up yet, so it
 # forks a background job (phase `guest-sync`) and returns immediately. That
 # job:
@@ -20,7 +22,8 @@
 #   3. waits for the guest agent
 #   4. sets the guest's hostname to the VM's name
 #   5. writes a static /etc/network/interfaces from the VMID (network.yaml)
-#      and brings the interface down and up again
+#      and brings the interface down and up again (not in ipam mode: there
+#      the guest stays on DHCP and gets the address reserved at pre-start)
 #   6. syncs the Linux Update Dashboard SSH key
 #   7. syncs APT sources/config/keys (apt.yaml)
 #   8. template base for VMs not cloned from the template: disk growth, zram
@@ -55,6 +58,17 @@ my $APT_CONF_DIR    = "$SNIPPETS/apt.conf.d";
 my $APT_KEY_CACHE   = "$SNIPPETS/.apt-keys";
 my $APT_KEY_MAX_AGE = 1;    # days before a cached key is re-downloaded
 my $APT_MARKER      = 'managed by hookscript (apt.yaml)';
+
+# Per-cluster config overrides: a file in /etc/pve/hookscript/ wins over the
+# repo copy in $SNIPPETS (a git checkout that hooksync pulls every night), so
+# hosts that need different settings keep their own copy there. Same as
+# hookscript.pl.
+my $LOCAL_CONF_DIR = '/etc/pve/hookscript';
+sub conf_path {
+    my ($name) = @_;
+    my $local = "$LOCAL_CONF_DIR/$name";
+    return -e $local ? $local : "$SNIPPETS/$name";
+}
 
 my $AGENT_WAIT         = 300;  # seconds to wait for the guest agent after boot
 my $GUEST_EXEC_TIMEOUT = 60;   # seconds per `qm guest exec`
@@ -237,7 +251,7 @@ sub derive_network {
     return $derived_network if defined $derived_network;
     $derived_network = 0;
 
-    my $path = "$SNIPPETS/network.yaml";
+    my $path = conf_path('network.yaml');
     return undef unless -e $path;
     my $netcfg = eval { LoadFile($path) };
     if ($@) {
@@ -245,7 +259,8 @@ sub derive_network {
         return undef;
     }
 
-    my ($vlan, $host) = $vmid =~ /^(\d{2})(\d{3})$/;
+    # VVOOO, or VOOO for a one-digit network number (VPS hosts: VMID 2075)
+    my ($vlan, $host) = $vmid =~ /^(\d{1,2})(\d{3})$/;
     unless (defined $vlan) {
         logmsg("VMID $vmid does not match VVOOO network scheme, skipping static IP");
         return undef;
@@ -262,6 +277,7 @@ sub derive_network {
     my $base     = $netcfg->{network}{base};
     my $gw_octet = $netcfg->{gateway_overrides}{$vlan} // $netcfg->{network}{gateway_octet};
     my %net = (
+        mode => $netcfg->{mode} // 'static',
         vnet => $vnet,
         ip   => "$base.$vlan.$host",
         cidr => $netcfg->{network}{cidr},
@@ -346,6 +362,8 @@ sub guest_iface_for_mac {
 
 sub sync_guest_network {
     my $net = derive_network() or return;
+    # ipam mode: the guest stays on DHCP, the address is reserved at pre-start
+    return if $net->{mode} eq 'ipam';
 
     my $mac = net0_mac(read_config());
     unless ($mac) {
@@ -392,6 +410,177 @@ sub sync_guest_network {
 
     apply_interfaces($if, $want, $managed, $net) if $current ne $want;
     sync_resolv_conf($net);
+}
+
+# network.yaml `mode: ipam`, at pre-start: reserve the VMID-derived IP for
+# net0's MAC before QEMU's tap setup (pve-bridge) would pick a pool address.
+# Moving net0 to the VNet still happens in the background job (QEMU has read
+# its config by now), but the reservation is made on the target VNet either
+# way. A VM that starts on another bridge does its first DHCP there, so on the
+# VPS hosts keep templates on the VNet already.
+sub reserve_ipam_for_vm {
+    my $net = derive_network() or return;
+    return unless $net->{mode} eq 'ipam';
+    my $mac = net0_mac(read_config());
+    unless ($mac) {
+        logmsg("VM $vmid has no net0 MAC address, skipping IPAM reservation");
+        return;
+    }
+    reserve_ipam_ip($net->{vnet}, $mac, $net->{ip}, $net->{gw});
+}
+
+# -------------------------
+# SDN IPAM reservation (network.yaml `mode: ipam`)
+# -------------------------
+#
+# For hosts whose guests get their address from an SDN zone with DHCP
+# (dnsmasq) + PVE IPAM, e.g. the single-IP VPS hosts behind SNAT. The guest
+# keeps ip=dhcp; the hook reserves the VMID-derived IP for the NIC's MAC, so
+# dnsmasq always hands out that address. Has to run at pre-start: Proxmox only
+# picks a pool address when the MAC has no IPv4 in IPAM yet
+# (PVE::Network::SDN::Vnets::add_dhcp_mapping), and does that after pre-start
+# for containers (lxc-pve-prestart-hook) and VMs (pve-bridge). It already
+# reserves a pool address at create time, so normally an entry gets moved:
+# delete the pool address, create the derived one, then set the vmid on it
+# (`create` doesn't take one). Destroying the guest frees the entry as usual.
+# Same code in hookscript.pl and vm-hookscript.pl.
+
+my $IPAM_STATE = '/etc/pve/sdn/pve-ipam-state.json';
+
+sub ip4_to_int {
+    my @o = split /\./, shift;
+    return (($o[0] * 256 + $o[1]) * 256 + $o[2]) * 256 + $o[3];
+}
+
+sub sdn_vnet_zone {
+    my ($vnet) = @_;
+    open my $fh, '<', '/etc/pve/sdn/vnets.cfg' or return undef;
+    my ($cur, $zone);
+    while (my $l = <$fh>) {
+        if ($l =~ /^\S+:\s*(\S+)/) { $cur = $1; next; }
+        if (defined $cur && $cur eq $vnet && $l =~ /^\s+zone\s+(\S+)/) { $zone = $1; last; }
+    }
+    close $fh;
+    return $zone;
+}
+
+# DHCP ranges ([start, end]) of the VNet's subnets
+sub sdn_dhcp_ranges {
+    my ($vnet) = @_;
+    open my $fh, '<', '/etc/pve/sdn/subnets.cfg' or return ();
+    my (@sections, $s);
+    while (my $l = <$fh>) {
+        if ($l =~ /^\S+:\s*\S+/) { $s = { ranges => [] }; push @sections, $s; next; }
+        next unless $s;
+        $s->{vnet} = $1 if $l =~ /^\s+vnet\s+(\S+)/;
+        if ($l =~ /^\s+dhcp-range\s+(\S+)/) {
+            my %kv = map { split /=/, $_, 2 } split /,/, $1;
+            push @{ $s->{ranges} }, [ $kv{'start-address'}, $kv{'end-address'} ]
+                if $kv{'start-address'} && $kv{'end-address'};
+        }
+    }
+    close $fh;
+    return map { @{ $_->{ranges} } } grep { ($_->{vnet} // '') eq $vnet } @sections;
+}
+
+# IPv4 entries of the zone's IPAM: { ip => { mac, vmid, gateway, ... } }
+sub ipam_entries {
+    my ($zone) = @_;
+    open my $fh, '<', $IPAM_STATE or return {};
+    local $/;
+    my $state = eval { decode_json(<$fh>) } || {};
+    close $fh;
+    my %entries;
+    foreach my $subnet (values %{ $state->{zones}{$zone}{subnets} || {} }) {
+        while (my ($ip, $e) = each %{ $subnet->{ips} || {} }) {
+            $entries{$ip} = $e if $ip =~ /^\d+\.\d+\.\d+\.\d+$/;
+        }
+    }
+    return \%entries;
+}
+
+# The IPv4 address IPAM holds for this MAC on the VNet (undef if none)
+sub ipam_ip_for_mac {
+    my ($vnet, $mac) = @_;
+    my $zone = sdn_vnet_zone($vnet) or return undef;
+    my $entries = ipam_entries($zone);
+    my ($ip) = grep { uc($entries->{$_}{mac} // '') eq uc($mac) } sort keys %$entries;
+    return $ip;
+}
+
+sub pvesh_ipam {
+    my ($action, $vnet, %opt) = @_;
+    my @cmd = ('pvesh', $action, "/cluster/sdn/vnets/$vnet/ips",
+               map { ("--$_", $opt{$_}) } sort keys %opt);
+    my $pid = open(my $fh, '-|');
+    return (1, "fork failed: $!") unless defined $pid;
+    if (!$pid) {
+        open STDERR, '>&', \*STDOUT;
+        exec @cmd or exit 127;
+    }
+    local $/;
+    my $out = <$fh> // '';
+    close $fh;
+    $out =~ s/\s+$//;
+    return ($? >> 8, $out);
+}
+
+sub reserve_ipam_ip {
+    my ($vnet, $mac, $ip, $gw) = @_;
+    $mac = uc $mac;
+
+    my $zone = sdn_vnet_zone($vnet);
+    unless ($zone) {
+        logmsg("VNet $vnet not found in /etc/pve/sdn/vnets.cfg, skipping IPAM reservation");
+        return;
+    }
+    if ($ip eq $gw) {
+        logmsg("$ip (from VMID $vmid) is the gateway of $vnet, not reserving it");
+        return;
+    }
+    foreach my $r (sdn_dhcp_ranges($vnet)) {
+        my $n = ip4_to_int($ip);
+        if ($n >= ip4_to_int($r->[0]) && $n <= ip4_to_int($r->[1])) {
+            logmsg("$ip (from VMID $vmid) is inside the DHCP range $r->[0]-$r->[1] of $vnet, not reserving it; $vmid keeps a pool address");
+            return;
+        }
+    }
+
+    my $entries = ipam_entries($zone);
+    my $holder  = $entries->{$ip};
+    if ($holder && uc($holder->{mac} // '') ne $mac) {
+        my $who = $holder->{gateway} ? 'the gateway'
+                : 'MAC ' . ($holder->{mac} // '?') . (defined $holder->{vmid} ? " (VMID $holder->{vmid})" : '');
+        logmsg("$ip is already reserved in IPAM for $who, leaving $vmid on its pool address");
+        return;
+    }
+
+    my @old = grep { $_ ne $ip && uc($entries->{$_}{mac} // '') eq $mac } sort keys %$entries;
+    foreach my $old (@old) {
+        my ($rc, $out) = pvesh_ipam('delete', $vnet, ip => $old, mac => $mac, zone => $zone);
+        if ($rc) {
+            logmsg("Removing IPAM entry $old for $mac failed: $out");
+            return;
+        }
+    }
+
+    unless ($holder) {
+        my ($rc, $out) = pvesh_ipam('create', $vnet, ip => $ip, mac => $mac, zone => $zone);
+        if ($rc) {
+            logmsg("Reserving $ip for $mac in IPAM failed: $out");
+            return;
+        }
+    }
+    if (!$holder || ($holder->{vmid} // '') ne $vmid) {
+        my ($rc, $out) = pvesh_ipam('set', $vnet, ip => $ip, mac => $mac, zone => $zone, vmid => $vmid);
+        logmsg("Setting vmid $vmid on IPAM entry $ip failed: $out") if $rc;
+    }
+
+    if ($holder && !@old) {
+        logmsg("$ip is reserved for $mac in IPAM (zone $zone, vnet $vnet)");
+        return;
+    }
+    logmsg("Reserved $ip for $mac in IPAM (zone $zone, vnet $vnet)" . (@old ? ", was @old" : ''));
 }
 
 sub nameservers {
@@ -736,6 +925,16 @@ sub cloudflare_register {
         return;
     }
     my $ip = $net->{ip};
+    # ipam mode: use what IPAM actually holds for net0's MAC (normally the
+    # derived IP; a pool address if the reservation was refused)
+    if ($net->{mode} eq 'ipam') {
+        my $mac = net0_mac(@lines);
+        $ip = $mac ? ipam_ip_for_mac($net->{vnet}, $mac) : undef;
+        unless ($ip) {
+            logmsg("cft tag present for $vmid ($fqdn) but net0 has no address in IPAM, skipping cloudflare tunnel setup");
+            return;
+        }
+    }
 
     my $secrets = load_secrets();
     return unless $secrets;
@@ -1029,7 +1228,7 @@ sub apt_disable_legacy {
 }
 
 sub sync_apt {
-    my $path = "$SNIPPETS/apt.yaml";
+    my $path = conf_path('apt.yaml');
     return unless -e $path;
     my $aptcfg = eval { LoadFile($path) };
     if ($@) {
@@ -1189,7 +1388,7 @@ my $FSTAB_END   = '# END vm-hookscript NFS mounts';
 my $NFS_INSTALL_WAIT = 10 * 60;
 
 sub sync_nfs_mounts {
-    my $path = "$SNIPPETS/mounts.yaml";
+    my $path = conf_path('mounts.yaml');
     return unless -e $path;
     my $cfg = eval { LoadFile($path) };
     if ($@) {
@@ -1481,6 +1680,8 @@ if ($phase eq 'apt-sync') {
 }
 elsif ($phase eq 'pre-start') {
     logmsg("$vmid is starting");
+    eval { reserve_ipam_for_vm() };
+    logmsg("IPAM reservation failed for $vmid: $@") if $@;
 }
 elsif ($phase eq 'post-start') {
     logmsg("$vmid started, guest sync running in the background (see /tmp/hook.log)");

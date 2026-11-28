@@ -9,8 +9,25 @@
 # Example: VMID 10075 -> VLAN 10, IP 192.168.10.75,  fd00:10::75
 #          VMID 16241 -> VLAN 16, IP 192.168.16.241, fd00:16::241
 #
+# A one-digit network number works too (VMID VOOO): VMID 2075 -> 10.0.2.75
+# with base 10.0. The VPS hosts use that, see vps/network.yaml.
+#
 # To adapt this to a different network (e.g. 10.0.x.x instead of 192.168.x.x),
 # just change `base` below.
+#
+# Hosts that need their own settings put a copy of this file (and/or
+# mounts.yaml, apt.yaml) in /etc/pve/hookscript/ - that copy wins over this
+# one and isn't touched by hooksync's nightly `git pull`.
+#
+# mode:
+#   static (default) - containers get ip=/gw= (+ ip6=) in their config, VMs a
+#                      static /etc/network/interfaces written via the guest agent
+#   ipam             - for SDN zones with DHCP (dnsmasq) + PVE IPAM, e.g. the
+#                      single-IP VPS hosts: net0 stays on ip=dhcp and the hook
+#                      reserves the VMID-derived IP for net0's MAC in IPAM at
+#                      pre-start (LXC and VMs). The IP must not be the gateway
+#                      or inside the subnet's DHCP range. IPv6 is left alone.
+mode: static
 network:
   base: 192.168       # first two octets of the network
   cidr: 24

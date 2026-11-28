@@ -1,0 +1,4 @@
+# mounts.yaml for the VPS hosts: no NAS there, so no managed mounts. Copy to
+# /etc/pve/hookscript/mounts.yaml so the repo's mounts.yaml (home NAS) isn't
+# used.
+common: {}
