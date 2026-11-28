@@ -1,0 +1,18 @@
+# network.yaml for the single-IP VPS hosts (vps1, vps2, ...). Copy to
+# /etc/pve/hookscript/network.yaml on the host and set the network number.
+#
+# Each VPS has one SDN Simple zone (DHCP: dnsmasq, IPAM: pve) with one VNet and
+# subnet 10.0.<n>.0/24, gateway 10.0.<n>.1, SNAT on, DHCP range high in the
+# /24 (vps2: 10.0.2.200-210). Guests keep ip=dhcp; the hook reserves the
+# VMID-derived IP in IPAM:
+#   VMID <n>OOO -> 10.0.<n>.OOO     e.g. vps2: VMID 2075 -> 10.0.2.75
+# VMIDs outside the scheme (e.g. 100) just get a pool address.
+mode: ipam
+network:
+  base: 10.0
+  cidr: 24
+  gateway_octet: 1
+
+# network number -> VNet (vps1: `1: vnet0`, vps2: `2: vnet0`, ...)
+vnets:
+  2: vnet0

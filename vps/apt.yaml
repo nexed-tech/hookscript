@@ -1,0 +1,8 @@
+# apt.yaml for the VPS hosts: like the repo's apt.yaml, minus the home APT
+# proxy (00aptproxy). Copy to /etc/pve/hookscript/apt.yaml. Entries still come
+# from apt.sources.d/ and apt.conf.d/ in the snippets folder.
+default: [debian]
+
+tags:
+  docker: [docker]
+  tailscale: [tailscale]
