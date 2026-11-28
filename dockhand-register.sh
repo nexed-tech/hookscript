@@ -1,7 +1,7 @@
 #!/bin/bash
 # Registers a Docker host that runs Hawser in Dockhand, and deploys its stacks.
 #
-# Shared by proxdock-provision.sh (LXC) and vm-hookscript.pl (VMs). Runs on the
+# Shared by proxdock-provision.sh (LXC) and hookscript.pl (VMs, steps/post-start/90-docker.pl). Runs on the
 # Proxmox host and only talks to the Dockhand API, nothing in the guest.
 #
 #   dockhand-register.sh <name> <ip> <hawser-token> <token-is-new: 0|1> [stack...]

@@ -6,7 +6,7 @@
 # job in the background (the config is locked while post-start runs), which:
 #   1. starts Hawser in the CT (/opt/stacks/hawser from the template) with a fresh token
 #   2. registers it in Dockhand and deploys BASE_STACK plus one git stack per `stack-<name>`
-#      tag (dockhand-register.sh, shared with vm-hookscript.pl; stacks Dockhand already has
+#      tag (dockhand-register.sh, shared with hookscript.pl's docker step; stacks Dockhand already has
 #      are left alone)
 #   3. swaps this hookscript for the normal one in the CT config
 # Until step 3 succeeds the CT keeps this hookscript, so the next start retries.

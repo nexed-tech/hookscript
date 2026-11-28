@@ -1,7 +1,7 @@
 # Debian 13 VM template (deb13-template, VMID 999001)
 
 Base template for VMs on LINSTOR. Clone it, resize the disk to what the VM
-needs, start it, and `vm-hookscript.pl` does the rest (network, hostname,
+needs, start it, and `hookscript.pl` does the rest (network, hostname,
 keys, APT sources).
 
 ## What's in the template
@@ -21,7 +21,7 @@ Packages on top of a minimal netinst: `qemu-guest-agent`, `cloud-guest-utils`
 (growpart), `systemd-zram-generator`, `curl`, `rsync`.
 
 VM config: SeaBIOS, i440fx, `virtio0` on `linstor` (4 GB, `iothread=1`),
-`agent: 1`, `hookscript: local:snippets/vm-hookscript.pl`, boot `order=virtio0`.
+`agent: 1`, `hookscript: local:snippets/hookscript.pl` (the old `vm-hookscript.pl` still works), boot `order=virtio0`.
 
 ## NFS mounts
 
@@ -33,7 +33,7 @@ reboot from inside the VM. Removing a tag unmounts that share on the next start.
 
 ## Docker hosts
 
-Tag a clone `docker` (plus `stack-<name>` per stack) and `vm-hookscript.pl`
+Tag a clone `docker` (plus `stack-<name>` per stack) and `hookscript.pl`
 turns it into a Dockhand-managed Docker host on its first start: Docker from
 the Docker apt repo, Hawser in `/opt/stacks/hawser` (compose file from
 `hawser/` in this folder, token generated once), registered in Dockhand under
@@ -58,7 +58,7 @@ deploys just that stack. Progress: `journalctl -t hookscript-<vmid>`, and
 - **`ci-debian.yaml` is outdated** for this template: it creates a 4 GB
   swapfile, and its apt proxy line is malformed (`http:/aptcache...`, one
   slash). The template doesn't use cloud-init; either fix or remove it.
-- **`first-boot.sh` races the hookscript.** `vm-hookscript.pl` reconfigures the
+- **`first-boot.sh` races the hookscript.** `hookscript.pl` reconfigures the
   network in the background right after boot; the script retries the GitHub
   fetch (~2 min) and the upgrade to ride that out. Cleaner: have the hookscript
   trigger the upgrade once it's done with the network.

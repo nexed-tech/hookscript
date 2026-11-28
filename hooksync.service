@@ -1,6 +1,7 @@
 # This service runs once at boot
-# It pulls the latest hookscript + mounts.yaml from GitHub, then re-syncs the
-# APT sources/config/keys into every running container and VM (apt.yaml)
+# It pulls the latest hookscript + profiles from GitHub, then re-syncs the
+# APT sources/config/keys into every running container and VM (apt.yaml).
+# profile.json and .env.secrets are gitignored, so the pull never touches them.
 
 # place in /etc/systemd/system/hooksync.service
 # systemctl daemon-reload
@@ -16,8 +17,7 @@ Type=oneshot
 WorkingDirectory=/var/lib/vz/snippets
 ExecStart=-/bin/sh -c '/usr/bin/git pull && echo "$(date) - $(/usr/bin/git rev-parse HEAD)" >> /var/log/hooksync.log'
 # "-" on the pull above: still sync with the current checkout if the pull failed
-ExecStart=-/usr/bin/perl /var/lib/vz/snippets/hookscript.pl apt-sync-all
-ExecStart=/usr/bin/perl /var/lib/vz/snippets/vm-hookscript.pl apt-sync-all
+ExecStart=/usr/bin/perl /var/lib/vz/snippets/hookscript.pl apt-sync-all
 User=root
 
 [Install]

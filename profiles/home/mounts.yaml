@@ -1,6 +1,9 @@
 # Mount tags. Same tag, same target path in LXC containers and VMs:
-#   LXC (hookscript.pl):    `mp` + `src` (the host's NFS mount) bind-mounted at `dst`
-#   VM (vm-hookscript.pl):  `nfs` mounted at `dst` by the guest itself (/etc/fstab)
+#   containers (steps/pre-start/20-mounts.pl): `mp` + `src` (the host's NFS mount)
+#                                              bind-mounted at `dst`
+#   VMs (steps/post-start/80-nfs.pl):          `nfs` mounted at `dst` by the guest
+#                                              itself (/etc/fstab)
+# Optional `hosts: { <node>: { <tag>: {...} } }` overrides tags per node.
 common:
   mp-s:
     mp: mp0

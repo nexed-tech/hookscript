@@ -1,4 +1,5 @@
-# APT sources + config pushed into Debian containers on every start/reboot.
+# APT sources + config pushed into Debian containers and VMs on every
+# start/reboot, and daily by hooksync (`hookscript.pl apt-sync-all`).
 #
 # Each entry name resolves to one or both of:
 #   apt.sources.d/<name>.sources  -> /etc/apt/sources.list.d/<name>.sources
